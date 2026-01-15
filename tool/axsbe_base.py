@@ -77,13 +77,13 @@ class INSTRUMENT_TYPE(Enum): # 3bit
 
 class TPM():
     # TradingPhase of Market，市场交易阶段内部编码
-    Starting = 0
-    OpenCall = 1
-    PreTradingBreaking = 2
-    AMTrading = 3
-    Breaking = 4
-    PMTrading = 5
-    CloseCall = 6
+    Starting = 0  # < 91500000
+    OpenCall = 1  # < 92500000
+    PreTradingBreaking = 2  # < 93000000
+    AMTrading = 3  # < 113000000
+    Breaking = 4  # < 130000000
+    PMTrading = 5  # < 145700000
+    CloseCall = 6  # < 150000000
     AfterCloseTrading = 7 # 虽然我们编码这个交易阶段，但在111/192/191消息中不会碰到，其用于300611/303711消息
     VolatilityBreaking = 8
     Ending = 9
@@ -173,8 +173,8 @@ class axsbe_base(metaclass=abc.ABCMeta):
         self.SecurityIDSource = SecurityIDSource #"证券代码源101=上交所;102=深交所;103=香港交易所"
         self.MsgType = MsgType
         self.SecurityID = -1
-        self.ChannelNo = 0xffff
-        self.ApplSeqNum = 0xffffffffffffffff
+        self.ChannelNo = 0xffff               # 通道号
+        self.ApplSeqNum = 0xffffffffffffffff  # 通道内的消息号
         self.TransactTime = 0   #上海snap时戳精度秒、逐笔精度10毫秒，在构造时统一到毫秒？
 
         self._tick = None

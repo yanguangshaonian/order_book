@@ -86,6 +86,8 @@ def bitSizeOf(i:int):
         n+=1
     return n
 
+
+# 把 log文件中的 转为 dict 
 def str_to_dict(s:str):
     if s[:2] != "//":
         return None
@@ -96,6 +98,10 @@ def str_to_dict(s:str):
 
 
 def dict_to_axsbe(s:dict):
+    # 从字典构造出一个
+    # print(s)
+    # {'SecurityIDSource': 102, 'MsgType': 192, 'MsgLen': 48, 'SecurityID': 300750, 'ChannelNo': 2011, 'ApplSeqNum': 156016, 'TradingPhase': 255, 'Price': 3800000, 'OrderQty': 10000, 'Side': 49, 'OrdType': 50, 'TransactTime': 20220426092059460}
+    
     if s['MsgType'] in axsbe_base.MsgTypes_order:   #order
         order = axsbe_order(MsgType=s['MsgType'])
         order.load_dict(s)

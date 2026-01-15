@@ -11,17 +11,17 @@ class axsbe_order(axsbe_base.axsbe_base):
     '''
     
     __slots__ = [
-        'SecurityIDSource',
+        'SecurityIDSource',   # 所属交易所
         'MsgType',
         'SecurityID',
-        'ChannelNo',
-        'ApplSeqNum',
+        'ChannelNo',    # 通道号
+        'ApplSeqNum',   # 通道内的消息号
         'TransactTime',     #SH-STOCK.OrderTime; SH-BOND.TickTime
 
         'Price',
         'OrderQty',
-        'Side',             #SH-BOND.TickBSFlag
-        'OrdType',
+        'Side',       # 买/卖      #SH-BOND.TickBSFlag
+        'OrdType',    # 深圳: 市价/限价/本方最优; 上海: 新增/删除
 
         'OrderNo',          #SH-STOCK; SH-BOND
         'BizIndex',         #SH-STOCK
@@ -51,7 +51,7 @@ class axsbe_order(axsbe_base.axsbe_base):
         self.ChannelNo = dict['ChannelNo']
         self.ApplSeqNum = dict['ApplSeqNum']
         
-        #消息体
+        # 深圳处理
         if self.SecurityIDSource == axsbe_base.SecurityIDSource_SZSE:
             self.Price = dict['Price']
             self.OrderQty = dict['OrderQty']
@@ -60,6 +60,8 @@ class axsbe_order(axsbe_base.axsbe_base):
             self.OrdType = dict['OrdType']
         elif self.SecurityIDSource == axsbe_base.SecurityIDSource_SSE:
             self.OrderNo = dict['OrderNo']
+
+            # 上海股票
             if self.MsgType==axsbe_base.MsgType_order_stock:
                 self.Price = dict['Price']
                 self.OrderQty = dict['OrderQty']
@@ -67,6 +69,9 @@ class axsbe_order(axsbe_base.axsbe_base):
                 self.Side = dict['Side']
                 self.TransactTime = dict['TransactTime']
                 self.BizIndex = dict['BizIndex']
+
+            # 上海债券, 
+            # 上海债券 的 撤单是在 委托回报中的 (而上海股票撤单是在成交中的)
             elif self.MsgType==axsbe_base.MsgType_order_sse_bond_add or self.MsgType==axsbe_base.MsgType_order_sse_bond_del:
                 self.Side = dict['TradingPhase']
                 self.Qty = dict['Qty']
@@ -181,212 +186,14 @@ class axsbe_order(axsbe_base.axsbe_base):
 
     @property
     def bytes_stream(self):
-        '''将字段打包成字节流，重载'''
-        if self.SecurityIDSource == axsbe_base.SecurityIDSource_SZSE:
-            #SecurityIDSource=102
-            bin = struct.pack("<B", axsbe_base.SecurityIDSource_SZSE)
-            #MsgType=192
-            bin += struct.pack("<B", axsbe_base.MsgType_order_stock)
-            #MsgLen=48
-            bin += struct.pack("<H", 48)
-            #SecurityID=000997
-            bin += struct.pack("<9s", ("%06u  "%self.SecurityID).encode('UTF-8'))
-            #ChannelNo=2013
-            bin += struct.pack("<H", self.ChannelNo)
-            #ApplSeqNum=399751
-            bin += struct.pack("<Q", self.ApplSeqNum)
-            #TradingPhase=0
-            bin += struct.pack("<B", 0)
-            #Price=182100
-            bin += struct.pack("<i", self.Price)
-            #OrderQty=100000
-            bin += struct.pack("<q", self.OrderQty)
-            #Side=49
-            bin += struct.pack("<B", self.Side)
-            #OrdType=50
-            bin += struct.pack("<B", self.OrdType)
-            #TransactTime=20190311093000150
-            bin += struct.pack("<Q", self.TransactTime)
-            #resv=
-            bin += struct.pack("<2B", 0, 0)
-        elif  self.SecurityIDSource == axsbe_base.SecurityIDSource_SSE:
-            #SecurityIDSource=101
-            bin = struct.pack("<B", axsbe_base.SecurityIDSource_SSE)
-            #MsgType=192
-            bin += struct.pack("<B", self.MsgType)
-
-            if self.MsgType==axsbe_base.MsgType_order_stock:
-                #MsgLen=64
-                bin += struct.pack("<H", 64)
-            elif self.MsgType==axsbe_base.MsgType_order_sse_bond_add or self.MsgType==axsbe_base.MsgType_order_sse_bond_del:
-                #MsgLen=64
-                bin += struct.pack("<H", 48)
-            else:
-                raise Exception(f'Not support SSE order Type={self.MsgType}')
-
-            #SecurityID=600519
-            bin += struct.pack("<9s", ("%06u  "%self.SecurityID).encode('UTF-8'))
-            #ChannelNo=6
-            bin += struct.pack("<H", self.ChannelNo)
-            #ApplSeqNum=229692
-            bin += struct.pack("<Q", self.ApplSeqNum)
-            if self.MsgType==axsbe_base.MsgType_order_stock:
-                #TradingPhase=0
-                bin += struct.pack("<B", 0)
-            elif self.MsgType==axsbe_base.MsgType_order_sse_bond_add or self.MsgType==axsbe_base.MsgType_order_sse_bond_del:
-                #TickBSFlag='B'
-                bin += struct.pack("<B", self.Side)
-
-            #OrderNo=225666
-            bin += struct.pack("<q", self.OrderNo)
-            #Price=1808080
-            bin += struct.pack("<i", self.Price)
-            #OrderQty=100000
-            bin += struct.pack("<q", self.OrderQty)
-
-            if self.MsgType==axsbe_base.MsgType_order_stock:
-                #OrdType=65
-                bin += struct.pack("<B", self.OrdType)
-                #Side=83
-                bin += struct.pack("<B", self.Side)
-
-            #TransactTime=9300128
-            bin += struct.pack("<I", self.TransactTime)
-
-            if self.MsgType==axsbe_base.MsgType_order_stock:
-                #resv=
-                bin += struct.pack("<6B", 0, 0, 0, 0, 0, 0)
-                #BizIndex=252932
-                bin += struct.pack("<Q", self.BizIndex)
-        else:
-            raise Exception(f'Not support SecurityIDSource={self.SecurityIDSource}')
-        return bin
-
+        return;
     def unpack_stream(self, bytes_i:bytes):
-        '''将消息字节流解包成字段值，重载'''
-        #公共头
-        self.SecurityIDSource, self.MsgType, _, self.SecurityID, self.ChannelNo, self.ApplSeqNum, self.Side = struct.unpack("<BBH9sHQB", bytes_i[:24])
-        self.SecurityID = int(self.SecurityID[:6])
-
-        if self.SecurityIDSource == axsbe_base.SecurityIDSource_SZSE:
-            self.Price,\
-            self.OrderQty,\
-            self.Side,\
-            self.OrdType,\
-            self.TransactTime, _, _ = struct.unpack("<iqBBQ2B", bytes_i[24:])
-        elif  self.SecurityIDSource == axsbe_base.SecurityIDSource_SSE:
-            self.OrderNo,\
-            self.Price,\
-            self.OrderQty = struct.unpack("<qiq", bytes_i[24:44])
-
-            if self.MsgType==axsbe_base.MsgType_order_stock:
-                self.OrdType,\
-                self.Side,\
-                self.TransactTime, \
-                _, _, _, _, _, _, \
-                self.BizIndex = struct.unpack("<BBI6BQ", bytes_i[44:])
-            elif self.MsgType==axsbe_base.MsgType_order_sse_bond_add or self.MsgType==axsbe_base.MsgType_order_sse_bond_del:
-                self.TransactTime,  = struct.unpack("<I", bytes_i[44:])
-                self.OrdType = ord('A') if self.MsgType==axsbe_base.MsgType_order_sse_bond_add else ord('D')
-        else:
-            raise Exception(f'Not support SecurityIDSource={self.SecurityIDSource}')
-        
+        return
     @property
     def ccode(self):
-        '''打印与hls c相同格式的日志，重载'''
-        if self.SecurityIDSource == axsbe_base.SecurityIDSource_SZSE:
-            s = f'''
-    order.Header.SecurityIDSource = __SecurityIDSource_SSZ_;
-    order.Header.MsgType = __MsgType_SSZ_ORDER__;
-    order.Header.MsgLen = BITSIZE_SBE_SSZ_ord_t_packed / 8;
-    setSecurityID(order.Header.SecurityID, "{"%06d"%self.SecurityID}");
-    order.Header.ChannelNo = {self.ChannelNo};
-    order.Header.ApplSeqNum = {self.ApplSeqNum};
-    order.Header.TradingPhase.Code0 = 0;
-    order.Header.TradingPhase.Code1 = 0;
-    order.Price = {self.Price};
-    order.OrderQty = {self.OrderQty};
-    order.Side = {self.Side};
-    order.OrdType = {self.OrdType};
-    order.TransactTime = {self.TransactTime};
-    order.Resv[0] = 0;
-    order.Resv[1] = 0;
-        '''
-    # order.TradingPhase = {'O' if self.TradingPhaseStr == '开盘集合竞价' else 'T'};
-        elif  self.SecurityIDSource == axsbe_base.SecurityIDSource_SSE:
-            if self.MsgType==axsbe_base.MsgType_order_stock:
-                mType = '__MsgType_SSH_ORDER__'
-                mSize = 'BITSIZE_SBE_SSH_ord_t_packed'
-                mTP = '''
-    order.Header.TradingPhase.Code0 = 0;
-    order.Header.TradingPhase.Code1 = 0;
-'''
-                mPrice_name = 'Price'
-                mQty_name = 'OrderQty'
-                mTime_name = 'OrderTime'
-            elif self.MsgType==axsbe_base.MsgType_order_sse_bond_add:
-                mType = '__MsgType_SSH_BOND_ORDER_ADD__'
-                mSize = 'BITSIZE_SBE_SSH_bond_order_add_t_packed'
-                mTP = f'    order.Header.TickBSFlag = {self.Side}'
-                mPrice_name = 'Price'
-                mQty_name = 'Qty'
-                mTime_name = 'TickTime'
-            elif self.MsgType==axsbe_base.MsgType_order_sse_bond_del:
-                mType = '__MsgType_SSH_BOND_ORDER_DEL__'
-                mSize = 'BITSIZE_SBE_SSH_bond_order_del_t_packed'
-                mTP = f'    order.Header.TickBSFlag = {self.Side}'
-                mPrice_name = 'Resv'
-                mQty_name = 'Qty'
-                mTime_name = 'TickTime'
-            else:
-                raise Exception(f'Not support SSE order Type={self.MsgType}')
-
-            s = f'''
-    order.Header.SecurityIDSource = __SecurityIDSource_SSH_;
-    order.Header.MsgType = {mType};
-    order.Header.MsgLen = {mSize} / 8;
-    setSecurityID(order.Header.SecurityID, "{"%06d"%self.SecurityID}");
-    order.Header.ChannelNo = {self.ChannelNo};
-    order.Header.ApplSeqNum = {self.ApplSeqNum};
-{mTP}
-    order.OrderNo = {self.OrderNo};
-    order.{mPrice_name} = {self.Price};
-    order.{mQty_name} = {self.OrderQty};
-'''
-
-            if self.MsgType==axsbe_base.MsgType_order_stock:
-                s += f'''
-    order.OrdType = {self.OrdType};
-    order.Side = {self.Side};
-'''
-            s += f'''
-    order.{mTime_name} = {self.TransactTime};
-'''
-
-            if self.MsgType==axsbe_base.MsgType_order_stock:
-                s += f'''
-    order.Resv[0] = 0;
-    order.Resv[1] = 0;
-    order.Resv[2] = 0;
-    order.Resv[3] = 0;
-    order.Resv[4] = 0;
-    order.Resv[5] = 0;
-    order.BizIndex = {self.BizIndex};
-'''
-
-        else:
-            raise Exception(f'Not support SecurityIDSource={self.SecurityIDSource}')
-        return s
-        
+        return
 
     def save(self):
-        '''save/load 用于保存/加载测试时刻'''
-        data = {}
-        for attr in self.__slots__:
-            value = getattr(self, attr)
-            data[attr] = value
-        return data
-
+        return
     def load(self, data):
-        for attr in self.__slots__:
-            setattr(self, attr, data[attr])
+        return

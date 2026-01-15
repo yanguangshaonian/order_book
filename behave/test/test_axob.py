@@ -255,6 +255,7 @@ def TEST_axob_bat(source_file, instrument_list:list, n_max=500,
     if not os.path.exists(source_file):
         raise f"{source_file} not exists"
 
+    # 解析文件出来
     loader_itor = axsbe_file(source_file)
 
     TEST_axob_core(loader_itor, 
