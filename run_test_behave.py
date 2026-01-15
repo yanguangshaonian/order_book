@@ -28,14 +28,15 @@ if __name__== '__main__':
     logger.addHandler(fh)
     logger.addHandler(sh)
     logPack = logger.debug, logger.info, logger.warn, logger.error
+
+
+    logger.info('starting sse 300750')
+    behave.TEST_axob(20220426, 300750, instrument_type=behave.INSTRUMENT_TYPE.STOCK, SecurityIDSource=behave.SecurityIDSource_SZSE)
+
     
     # 上交所：股票（暂时不研究，等逐笔合并流出来再说）
     # logger.info('starting sse 600519')
     # behave.TEST_axob(20230207, 600519, instrument_type=behave.INSTRUMENT_TYPE.STOCK, SecurityIDSource=behave.SecurityIDSource_SSE)
-
-    # 上交所：债券
-    logger.info('starting sse 300750')
-    behave.TEST_axob(20220426, 300750, instrument_type=behave.INSTRUMENT_TYPE.STOCK, SecurityIDSource=behave.SecurityIDSource_SZSE)
 
     ### 20220617测试错误
     # logger.info('starting TEST_axob_bat')
