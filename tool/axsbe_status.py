@@ -95,106 +95,18 @@ class axsbe_status(axsbe_base.axsbe_base):
 
     @property
     def bytes_stream(self):
-        '''将字段打包成字节流，重载'''
-        if self.SecurityIDSource == axsbe_base.SecurityIDSource_SZSE:
-            bin = struct.pack("<BBH9sHQB", self.SecurityIDSource, 
-                                           self.MsgType,
-                                           24,
-                                           ("%06u  "%self.SecurityID).encode('UTF-8'),
-                                           self.ChannelNo,
-                                           self.ApplSeqNum,
-                                           0)
-        elif  self.SecurityIDSource == axsbe_base.SecurityIDSource_SSE:
-            if self.MsgType==axsbe_base.MsgType_heartbeat:
-                bin = struct.pack("<BBH9sHQB", self.SecurityIDSource, 
-                                                self.MsgType,
-                                                24,
-                                                ("%06u  "%self.SecurityID).encode('UTF-8'),
-                                                self.ChannelNo,
-                                                self.ApplSeqNum,
-                                                0)
-            elif self.MsgType==axsbe_base.MsgType_status_sse_bond:
-                bin = struct.pack("<BBH9sHQB", self.SecurityIDSource, 
-                                                self.MsgType,
-                                                24,
-                                                ("%06u  "%self.SecurityID).encode('UTF-8'),
-                                                self.ChannelNo,
-                                                self.ApplSeqNum,
-                                                self.TradingPhaseInstrument)
-            else:
-                raise Exception(f'Not support SSE status Type={self.MsgType}')
-        else:
-            raise Exception(f'Not support SecurityIDSource={self.SecurityIDSource}')
-        return bin
+        return
 
     def unpack_stream(self, bytes_i:bytes):
-        '''将消息字节流解包成字段值，重载'''
-        #公共头
-        self.SecurityIDSource, self.MsgType, _, self.SecurityID, self.ChannelNo, self.ApplSeqNum, self.TradingPhaseInstrument = struct.unpack("<BBH9sHQB", bytes_i[:24])
-        self.SecurityID = int(self.SecurityID[:6])
-
-        if self.SecurityIDSource == axsbe_base.SecurityIDSource_SZSE:
-            pass
-        elif self.SecurityIDSource == axsbe_base.SecurityIDSource_SSE:
-            if self.MsgType==axsbe_base.MsgType_heartbeat:
-                pass
-            elif self.MsgType==axsbe_base.MsgType_status_sse_bond:
-                pass
-            else:
-                raise Exception(f'Not support SSE status Type={self.MsgType}')
-        else:
-            raise Exception(f'Not support SecurityIDSource={self.SecurityIDSource}')
-        
+        return
+    
     @property
     def ccode(self):
-        '''打印与hls c相同格式的日志，重载'''
-        if self.SecurityIDSource == axsbe_base.SecurityIDSource_SZSE:
-            s = f'''
-    heartbeat.Header.SecurityIDSource = __SecurityIDSource_SSZ_;
-    heartbeat.Header.MsgType = __MsgType_HEARTBEAT__;
-    heartbeat.Header.MsgLen = BITSIZE_SBE_SSZ_header_t_packed / 8;
-    setSecurityID(heartbeat.Header.SecurityID, "{"%06d"%self.SecurityID}");
-    heartbeat.Header.ChannelNo = {self.ChannelNo};
-    heartbeat.Header.ApplSeqNum = {self.ApplSeqNum};
-    heartbeat.Header.TradingPhase.Code0 = 0;
-    heartbeat.Header.TradingPhase.Code1 = 0;
-        '''
-        elif  self.SecurityIDSource == axsbe_base.SecurityIDSource_SSE:
-            if self.MsgType==axsbe_base.MsgType_heartbeat:
-                s = f'''
-    heartbeat.Header.SecurityIDSource = __SecurityIDSource_SSH_;
-    heartbeat.Header.MsgType = __MsgType_HEARTBEAT__;
-    heartbeat.Header.MsgLen = BITSIZE_SBE_SSH_header_t_packed / 8;
-    setSecurityID(heartbeat.Header.SecurityID, "{"%06d"%self.SecurityID}");
-    heartbeat.Header.ChannelNo = {self.ChannelNo};
-    heartbeat.Header.ApplSeqNum = {self.ApplSeqNum};
-    heartbeat.Header.TradingPhase = 0;
-        '''
-            elif self.MsgType==axsbe_base.MsgType_status_sse_bond:
-                s = f'''
-    status.Header.SecurityIDSource = __SecurityIDSource_SSH_;
-    status.Header.MsgType = __MsgType_SSH_BOND_STATUS__;
-    status.Header.MsgLen = BITSIZE_SBE_SSH_header_t_packed / 8;
-    setSecurityID(status.Header.SecurityID, "{"%06d"%self.SecurityID}");
-    status.Header.ChannelNo = {self.ChannelNo};
-    status.Header.ApplSeqNum = {self.ApplSeqNum};
-    status.Header.TickBSFlag = {self.TradingPhaseInstrument};
-        '''
-            else:
-                raise Exception(f'Not support SSE status Type={self.MsgType}')
-        else:
-            raise Exception(f'Not support SecurityIDSource={self.SecurityIDSource}')
-        return s
+        return
         
 
     def save(self):
-        '''save/load 用于保存/加载测试时刻'''
-        data = {}
-        for attr in self.__slots__:
-            value = getattr(self, attr)
-            data[attr] = value
-        return data
+        return
 
     def load(self, data):
-        for attr in self.__slots__:
-            setattr(self, attr, data[attr])
+        return
