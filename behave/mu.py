@@ -114,6 +114,7 @@ class MU():
         
         # 修改通道状态, 然后广播给通道内的所有 axob
         # 如果当前通道内 有 股票, 根据这个msg, 修正通道内的交易状态
+        # 解决“无消息时段”的状态切换。例如，9:15:00 这一刻可能没有任何逐笔数据到达，但状态必须切换为 OpenCall。或者中午 11:30:00 休市，可能没有最后一笔成交，必须由 MU 监控时间或快照来强制触发 SIGNAL
         if len(self.channel_map[unique_ChannelNo]['SecurityID_list']):
             # 如果当前通道内的 是 开始状态 < 91500000
             if self.channel_map[unique_ChannelNo]['TPM']==TPM.Starting: # Starting -> OpenCall

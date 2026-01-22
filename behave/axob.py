@@ -357,7 +357,7 @@ class AXOB():
         'YYMMDD',       # 日期
 
         'current_inc_tick',  # 整数。表示当前处理到的最新一笔逐笔消息的时间戳（
-        
+
         'BidWeightSize',  # 买方总委托量
         'BidWeightValue', # 买方总委托金额
         'AskWeightSize',  # 卖方总委托量
@@ -540,9 +540,15 @@ class AXOB():
 
                 assert self.constantValue_ready, f'{self.SecurityID:06d} constant values not ready!'
 
+                # 更新一下当前处理的数据最新时间
                 self._useTimestamp(msg.TransactTime)
-
+                
+                # 如果不是处在波动性中断状态 (防止错误覆盖), 才进行状态切换
+                # 这里主动更新状态, 如果没有主动, 那就被动等待 MU广播进入 elif isinstance(msg, AX_SIGNAL): 的分支
+                # 这里如果 msg如果是波动性中断, 那这里是切换, 给self也赋值, 
+                # 在 onTrade中进行恢复到连续竞价阶段, 波动性中断（临停）结束的标志是进行一次集合竞价撮合。当这次撮合完成（即买卖盘不再交叉）时，状态就会切换回连续竞价。
                 if self.TradingPhaseMarket!=axsbe_base.TPM.VolatilityBreaking:
+                    # 那就把外部传来的消息内的状态 更新到当前对象中
                     self.TradingPhaseMarket = msg.TradingPhaseMarket # 只用逐笔，在阶段切换期间，逐笔和快照的速率不同，可能快照切了逐笔没切，或反过来，
                                                                     # 由于我们重建完全基于逐笔，快照仅用来做检查，故阶段切换基于逐笔。
                                                                     # 几个例外情况：
@@ -1530,8 +1536,11 @@ class AXOB():
         '''超大数据钳位'''
         snap.AskWeightPx = self._clipInt32(snap.AskWeightPx) #当委托价无上限时，加权价格可能超出32位整数，也没有什么意义了，直接钳位到最大
 
+
+    # 每次处理 on_msg之前 就调用这个, 更新
     def _useTimestamp(self, TransactTime):
         if self.SecurityIDSource == SecurityIDSource_SZSE:
+            # TransactTime 20220426092044460  -- > 9204446
             self.current_inc_tick = TransactTime // SZSE_TICK_MS_TAIL % (SZSE_TICK_CUT // SZSE_TICK_MS_TAIL)    #只用逐笔 (10ms精度) 15000000 24b
         else:
             self.current_inc_tick = TransactTime # 上交所(1ms精度) 150000000
