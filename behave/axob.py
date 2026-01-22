@@ -319,59 +319,77 @@ class AXOB():
         'SecurityIDSource',
         'instrument_type',
 
-        'order_map',    # map of ob_order
-        'illegal_order_map',    # map of illegal_order
-        'bid_level_tree', # map of level_node
-        'ask_level_tree', # map of level_node
+        'order_map',    # map of ob_order, 保存了 所有的 委托号对应的订单详情, 当收到撤单或成交消息时 有时只有订单号需要根据订单号找到价格和数量
+        'illegal_order_map',    # map of illegal_order  保存因超出涨跌幅限制或其他原因被判为非法但尚未处理完毕的订单（主要用于创业板无涨跌幅限制期间的特殊逻辑）
+        'bid_level_tree', # map of level_node  买方/卖方价格树。以价格为 Key，保存该价位上的总挂单量（Qty）
+        'ask_level_tree', # map of level_node  同上
 
-        'NumTrades',
+        'NumTrades',  # 成交笔数
+
+        # 买一价、买一量 卖一价、卖一量 撮合逻辑的核心判断依据。每当有新订单进来，首先与这些值比较以判断是否能成交（交叉）。如果发生从该档位的撤单/成交，需要触发“寻找下一档最优价”的逻辑
         'bid_max_level_price',
         'bid_max_level_qty',
         'ask_min_level_price',
         'ask_min_level_qty',
+
+        # 统计类字段 最新、最高、最低、开盘价
         'LastPx',
         'HighPx',
         'LowPx',
         'OpenPx',
 
-        'closePx_ready',
+        # 收盘和 准备处理的标志位
+        'closePx_ready',        # 默认为 false 否已经最终确定并准备好用于生成闭市快照
+                                # . 核心背景：收盘价是如何产生的？
+                                #     根据交易所规则（尤其是深交所），收盘价的产生有两种情况：
+                                #     收盘集合竞价产生成交：集合竞价撮合成功，产生的成交价即为收盘价。
+                                #     收盘集合竞价未产生成交：如果集合竞价期间买卖盘无法撮合（如买一价 < 卖一价），则收盘价通常回退取“当日该证券最后一笔交易前一分钟所有交易的成交量加权平均价”（深交所规则），或者直接取最后一笔成交价（视具体规则而定）。
+                                #     问题在于：如果是情况 2，本地订单簿模型（AXOB）可能无法仅凭手头的逐笔数据精确计算出交易所最终认定的那个“加权平均价”或“官方收盘价”。因此，必须等待交易所发来的**闭市快照（Snapshot）**来“官宣”这个价格。
+        
+        'constantValue_ready',  # 默认为 false 收到 第一个状态Starting 切换消息之后 改为 true, 所有的 数据处理都要检查这个标志位
 
-        'constantValue_ready',
-        'ChannelNo',
-        'PrevClosePx',
-        'DnLimitPx',
-        'UpLimitPx',
-        'DnLimitPrice',
-        'UpLimitPrice',
-        'YYMMDD',
-        'current_inc_tick',
-        'BidWeightSize',
-        'BidWeightValue',
-        'AskWeightSize',
-        'AskWeightValue',
-        'AskWeightSizeEx',
-        'AskWeightValueEx',
+        'ChannelNo',    # 通道号
+        'PrevClosePx',  # 昨收价 用于计算涨跌停、价格笼子基准
+        'DnLimitPx',    # 跌停价 快照原始值
+        'UpLimitPx',    # 涨停价 快照原始值
+        'DnLimitPrice', # 跌停价 内部精度处理后的
+        'UpLimitPrice', # 涨停价 内部精度处理后的
+        'YYMMDD',       # 日期
+
+        'current_inc_tick',  # 整数。表示当前处理到的最新一笔逐笔消息的时间戳（
+        
+        'BidWeightSize',  # 买方总委托量
+        'BidWeightValue', # 买方总委托金额
+        'AskWeightSize',  # 卖方总委托量
+        'AskWeightValue', # 卖方总委托金额
+        'AskWeightSizeEx', # 排除统计（如创业板价格笼子外）的委托量
+        'AskWeightValueEx', # 排除统计（如创业板价格笼子外）的委托额
 
         'TotalVolumeTrade',
         'TotalValueTrade',
 
-        'holding_order',
-        'holding_nb',
+        # 交易逻辑缓冲
+        # 缓存“待定”订单
+        # 当收到一个市价单或本方最优单时，由于不知道具体的成交价格（取决于当时的对手盘），不能立即插入订单簿。系统将其暂存在 holding_order 中
+        # 紧接着收到对应的逐笔成交消息时，利用成交消息中的价格来确定 holding_order 的实际价格，处理完所有成交后，再将剩余部分（如果有）插入 order_map 和价格树
+        'holding_order',  # 保存了 ob_order 对象
+        'holding_nb',     # 计数
 
-        'TradingPhaseMarket',
+        'TradingPhaseMarket',     # 市场交易阶段
         # 'VolatilityBreaking_end_tick',
 
-        'AskWeightPx_uncertain',
+        'AskWeightPx_uncertain',    # 卖方加权均价不确定标志
 
-        'market_subtype',
-        'bid_cage_upper_ex_min_level_price',
-        'bid_cage_upper_ex_min_level_qty',
-        'ask_cage_lower_ex_max_level_price',
-        'ask_cage_lower_ex_max_level_qty',
-        'bid_cage_ref_px',
-        'ask_cage_ref_px',
-        'bid_waiting_for_cage',
-        'ask_waiting_for_cage',
+        'market_subtype',  # 市场子类型（主板/创业板/科创板等）。
+        'bid_cage_upper_ex_min_level_price', # 买方笼子上限之外的最低价格档（及其数量）
+        'bid_cage_upper_ex_min_level_qty',   # 买方笼子上限之外的最低价格档（及其数量）
+        'ask_cage_lower_ex_max_level_price', # 卖方笼子下限之外的最高价格档。
+        'ask_cage_lower_ex_max_level_qty',   # 卖方笼子下限之外的最高价格档。
+        'bid_cage_ref_px', # 基准价格。笼子的参考锚点，通常随成交价或一档价格变动
+        'ask_cage_ref_px', # 基准价格。笼子的参考锚点，通常随成交价或一档价格变动
+
+        'bid_waiting_for_cage',  # 护哪些订单在“笼子内”（参与撮合），哪些在“笼子外”（暂时隐藏）
+        'ask_waiting_for_cage',  # 当一笔成交发生导致 LastPx（最新价）变化，进而导致 ref_px（基准价）变化时，系统会检查这些字段，将原本在笼子外的订单“释放”进入核心订单簿（...level_tree），或将新订单关入笼子
 
         # profile
         'pf_order_map_maxSize',
@@ -388,7 +406,7 @@ class AXOB():
         'rebuilt_snaps',    # list of snap
         'market_snaps',     # list of snap
         'last_snap',
-        'last_inc_applSeqNum',
+        'last_inc_applSeqNum',  # 这个上一次处理的消息号
 
         'logger',
         'DBG',
@@ -449,7 +467,7 @@ class AXOB():
             self.holding_order = None
             self.holding_nb = 0
 
-            self.TradingPhaseMarket = axsbe_base.TPM.Starting
+            self.TradingPhaseMarket = axsbe_base.TPM.Starting    # 市场交易阶段
 
             self.AskWeightPx_uncertain = False #卖出加权价格无法确定（由于卖出委托价格越界）
 
@@ -503,11 +521,18 @@ class AXOB():
 
             # 深交所：始终逐笔序列号递增，这里做检查
             # 上交所：非合并流逐笔会乱序，不检查
+            # 这里是3个条件 必须是深圳股票, 必须是逐笔数据, 如果当前数据小于等于 上次处理的数据 说明 乱续了
             if self.SecurityIDSource==SecurityIDSource_SZSE and isinstance(msg, (axsbe_order, axsbe_exe)) and msg.ApplSeqNum<=self.last_inc_applSeqNum:
                 self.ERR(f"ApplSeqNum={msg.ApplSeqNum} <= last_inc_applSeqNum={self.last_inc_applSeqNum} repeated or outOfOrder!")
+                # 打印完了日志, 直接返回
                 return
 
             if isinstance(msg, (axsbe_order, axsbe_exe)):
+                # 这里会有问题, 所以放到了下面实现: 
+                #     1. 缓存单问题：在连续竞价结束瞬间，可能还有未处理的“缓存单”（holding_order，通常是等待成交的市价单或特定限价单）。
+                #          必须先处理完这些缓存单（尝试插入或撤销），然后再切换到收盘集合竞价状态。
+                #          新的信号处理逻辑显式检查了 if self.holding_nb == 0，确保了状态切换的安全性。
+                # 所以下面的代码注释了
                 # if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM and self.TradingPhaseMarket==axsbe_base.TPM.PMTrading and msg.TradingPhaseMarket==axsbe_base.TPM.CloseCall:
                 #     # 创业板进入收盘集合竞价，敞开价格笼子，将外面的隐藏订单放进来
                 #     self.openCage()
@@ -1424,7 +1449,7 @@ class AXOB():
                         self.market_snaps[snap.NumTrades] = [snap]
                     else:
                         self.market_snaps[snap.NumTrades].append(snap) #缓存交易所快照
-                    self.WARN(f'market snap #{self.msg_nb}({snap.TransactTime}) not found in history rebuilt snaps!')
+                    # self.WARN(f'market snap #{self.msg_nb}({snap.TransactTime}) not found in history rebuilt snaps!')
 
 
     def genSnap(self):

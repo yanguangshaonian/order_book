@@ -14,11 +14,11 @@ class MU():
       FPGA的MU:交易阶段管理【使MU接口符合统一格式，与AB解耦，AB可能由RTL实现。】【MU内部的消息格式重构需要放在最前端，可能要移到AB。】
     '''
     __slots__ = [
-        'axobs',
+        'axobs',  # 保存了订阅的股票
 
         'SecurityIDSource', 
 
-        'channel_map',
+        'channel_map',  # 记录了订阅 通道号 以及 通道内的 所管理的 我们订阅的股票列表
 
         'msg_nb',
 
@@ -39,9 +39,11 @@ class MU():
         'ERR',
     ]
     def __init__(self, SecurityID_list, SecurityIDSource, instrument_type:INSTRUMENT_TYPE, load_data=None) -> None:
+        print(f"创建了MU, SecurityID_list: {SecurityID_list}, SecurityIDSource: {SecurityIDSource}")
         if load_data is not None:
             self.load(load_data)
         else:
+            # 保存了 股票: 和axob
             self.axobs = dict(zip(SecurityID_list, [AXOB(x, SecurityIDSource, instrument_type) for x in SecurityID_list]))
 
             self.SecurityIDSource = SecurityIDSource
@@ -94,60 +96,70 @@ class MU():
         '''
         交易阶段管理
         '''
-        unique_ChannelNo = self.unique_ChannelNo(msg)
+
         
+        unique_ChannelNo = self.unique_ChannelNo(msg)
+        # print(type(msg), unique_ChannelNo, msg.ChannelNo, msg)
+
         if unique_ChannelNo not in self.channel_map:
             self.channel_map[unique_ChannelNo] = {
-                'TPM':TPM.Starting,
-                'SecurityID_list':[],
+                'TPM':TPM.Starting,  # 当前通道所属交易阶段
+                'SecurityID_list':[],# 当前通道管辖的股票号
             }
+
+        # 如果是我们订阅的股票    并且       还没被通道管理
         if msg.SecurityID in self.axobs and msg.SecurityID not in self.channel_map[unique_ChannelNo]['SecurityID_list']:
+            # 那就 添加到 管理通道 内
             self.channel_map[unique_ChannelNo]['SecurityID_list'].append(msg.SecurityID)
         
+        # 修改通道状态, 然后广播给通道内的所有 axob
+        # 如果当前通道内 有 股票, 根据这个msg, 修正通道内的交易状态
         if len(self.channel_map[unique_ChannelNo]['SecurityID_list']):
+            # 如果当前通道内的 是 开始状态 < 91500000
             if self.channel_map[unique_ChannelNo]['TPM']==TPM.Starting: # Starting -> OpenCall
                 #深交所：任意逐笔，或快照时戳大于等于开盘或快照状态（TODO:回归测试）
                 #上交所：逐笔要等到9:25才发送，仅用快照时戳或快照状态
                 if (isinstance(msg, (axsbe_order, axsbe_exe))) or\
                    (isinstance(msg, axsbe_status) and msg.TradingPhaseMarket==TPM.OpenCall) or\
                    (isinstance(msg, axsbe_snap_stock) and (msg.HHMMSSms>=91500000 or msg.TradingPhaseMarket==TPM.OpenCall)):
-                    self.INFO(f'Chnl {unique_ChannelNo} Starting -> OpenCall')
+                    self.WARN(f'Chnl {unique_ChannelNo} Starting -> OpenCall')
                     self.channel_map[unique_ChannelNo]['TPM'] = TPM.OpenCall
                     for id in self.channel_map[unique_ChannelNo]['SecurityID_list']: self.axobs[id].onMsg(AX_SIGNAL.OPENCALL_BGN)
             elif self.channel_map[unique_ChannelNo]['TPM']==TPM.OpenCall: # OpenCall -> PreTradingBreaking
-                # 任意逐笔离开开盘集合竞价，或快照时戳超过盘前休市15s
+                # 任意逐笔离开开盘集合竞价(都开始撮合了)，或快照时戳超过盘前休市15s
                 # 上交所: 债券市场状态进入连续自动撮合
                 if (isinstance(msg, axsbe_exe) and msg.TradingPhaseMarket==TPM.PreTradingBreaking) or\
                    (isinstance(msg, axsbe_status) and msg.TradingPhaseMarket==TPM.ContinuousAutomaticMatching) or\
                    (isinstance(msg, axsbe_snap_stock) and msg.HHMMSSms>=92515000):
-                    self.INFO(f'Chnl {unique_ChannelNo} OpenCall -> PreTradingBreaking')
+
+                    self.WARN(f'Chnl {unique_ChannelNo} OpenCall -> PreTradingBreaking')
                     self.channel_map[unique_ChannelNo]['TPM'] = TPM.PreTradingBreaking
                     for id in self.channel_map[unique_ChannelNo]['SecurityID_list']: self.axobs[id].onMsg(AX_SIGNAL.OPENCALL_END)
             elif self.channel_map[unique_ChannelNo]['TPM']==TPM.PreTradingBreaking: # PreTradingBreaking -> AMTrading
                 #任意逐笔进入上午连续竞价阶段，或快照时戳大于等于上午连续竞价
                 if (isinstance(msg, (axsbe_order, axsbe_exe)) and msg.TradingPhaseMarket==TPM.AMTrading) or\
                    (isinstance(msg, axsbe_snap_stock) and msg.HHMMSSms>=93000000):
-                    self.INFO(f'Chnl {unique_ChannelNo} PreTradingBreaking -> AMTrading')
+                    self.WARN(f'Chnl {unique_ChannelNo} PreTradingBreaking -> AMTrading')
                     self.channel_map[unique_ChannelNo]['TPM'] = TPM.AMTrading
                     for id in self.channel_map[unique_ChannelNo]['SecurityID_list']: self.axobs[id].onMsg(AX_SIGNAL.AMTRADING_BGN)
             elif self.channel_map[unique_ChannelNo]['TPM']==TPM.AMTrading: # AMTrading -> Breaking
                 #快照时戳大于等于中午休市15s
                 if (isinstance(msg, axsbe_snap_stock) and msg.HHMMSSms>=113015000):
-                    self.INFO(f'Chnl {unique_ChannelNo} AMTrading -> Breaking')
+                    self.WARN(f'Chnl {unique_ChannelNo} AMTrading -> Breaking')
                     self.channel_map[unique_ChannelNo]['TPM'] = TPM.Breaking
                     for id in self.channel_map[unique_ChannelNo]['SecurityID_list']: self.axobs[id].onMsg(AX_SIGNAL.AMTRADING_END)
             elif self.channel_map[unique_ChannelNo]['TPM']==TPM.Breaking: # Breaking -> PMTrading
                 #任意逐笔，或快照时戳大于等于下午连续竞价
                 if (isinstance(msg, (axsbe_order, axsbe_exe))) or\
                    (isinstance(msg, axsbe_snap_stock) and msg.HHMMSSms>=130000000):
-                    self.INFO(f'Chnl {unique_ChannelNo} Breaking -> PMTrading')
+                    self.WARN(f'Chnl {unique_ChannelNo} Breaking -> PMTrading')
                     self.channel_map[unique_ChannelNo]['TPM'] = TPM.PMTrading
                     for id in self.channel_map[unique_ChannelNo]['SecurityID_list']: self.axobs[id].onMsg(AX_SIGNAL.PMTRADING_BGN)
             elif self.channel_map[unique_ChannelNo]['TPM']==TPM.PMTrading: # PMTrading -> CloseCall
                 #任意逐笔进入收盘集合竞价阶段，或快照时戳大于等于收盘集合竞价15s
                 if (isinstance(msg, (axsbe_order, axsbe_exe)) and msg.TradingPhaseMarket==TPM.CloseCall) or\
                    (isinstance(msg, axsbe_snap_stock) and msg.HHMMSSms>=145715000):
-                    self.INFO(f'Chnl {unique_ChannelNo} PMTrading -> CloseCall')
+                    self.WARN(f'Chnl {unique_ChannelNo} PMTrading -> CloseCall')
                     self.channel_map[unique_ChannelNo]['TPM'] = TPM.CloseCall
                     for id in self.channel_map[unique_ChannelNo]['SecurityID_list']: self.axobs[id].onMsg(AX_SIGNAL.PMTRADING_END)
             elif self.channel_map[unique_ChannelNo]['TPM']==TPM.CloseCall: # CloseCall -> Ending
@@ -156,12 +168,13 @@ class MU():
                 if (isinstance(msg, axsbe_exe) and msg.TradingPhaseMarket==TPM.Ending) or\
                    (isinstance(msg, axsbe_status) and msg.TradingPhaseMarket==TPM.Closing) or\
                    (isinstance(msg, axsbe_snap_stock) and msg.HHMMSSms>=150015000):
-                    self.INFO(f'Chnl {unique_ChannelNo} CloseCall -> Ending')
+                    self.WARN(f'Chnl {unique_ChannelNo} CloseCall -> Ending')
                     self.channel_map[unique_ChannelNo]['TPM'] = TPM.Ending
                     for id in self.channel_map[unique_ChannelNo]['SecurityID_list']: self.axobs[id].onMsg(AX_SIGNAL.ALL_END)
         else:
             return
 
+        # 上面借用msg修正了交易状态, 这里判断是否进入业务处理如果没在订阅列表, 就跳出把
         if msg.SecurityID not in self.axobs:
             return
 
