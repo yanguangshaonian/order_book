@@ -85,12 +85,12 @@ class ob_order():
     __slots__ = [
         'applSeqNum',
         'price',
-        'qty',
-        'side',
-        'type',
+        'qty',  # 委托数量
+        'side',  # 买卖方向
+        'type',  # 限价 市价 本方最优
 
         # for test olny
-        'traded',
+        'traded',  # 这个委托 是否成交过
         'TransactTime',
     ]
 
@@ -117,11 +117,13 @@ class ob_order():
         else:
             self.type = TYPE.UNKNOWN
 
+        # 溢出检查
         if order.Price==msg_util.ORDER_PRICE_OVERFLOW: #原始价格越界 (不用管是否是LIMIT)
             self.price = PRICE_MAXIMUM  #本地也按越界处理，本地越界最终只影响到卖出加权价的计算
             axob_logger.warn(f'{order.SecurityID:06d} order ApplSeqNum={order.ApplSeqNum} Price over the maximum!')
             assert not(self.side==SIDE.BID and self.type==TYPE.LIMIT), f'{order.SecurityID:06d} BID order price overflow' #限价买单不应溢出
         else:
+            # 深圳
             if order.SecurityIDSource==SecurityIDSource_SZSE:
                 if instrument_type==INSTRUMENT_TYPE.STOCK:
                     self.price = order.Price // SZSE_STOCK_PRICE_RD # 深圳 N13(4)，实际股票精度为分
@@ -131,6 +133,8 @@ class ob_order():
                     self.price = order.Price // SZSE_KZZ_PRICE_RD # 深圳 N13(4)，实际基金精度为厘
                 else:
                     axob_logger.error(f'order SZSE ApplSeqNum={order.ApplSeqNum} instrument_type={instrument_type} not support!')
+            
+            # 上海
             elif order.SecurityIDSource==SecurityIDSource_SSE:
                 if instrument_type==INSTRUMENT_TYPE.STOCK:
                     self.price = order.Price // SSE_STOCK_PRICE_RD # 上海 原始数据3位小数
@@ -140,9 +144,12 @@ class ob_order():
                     axob_logger.error(f'order SSE ApplSeqNum={order.ApplSeqNum} instrument_type={instrument_type} not support!')
             else:
                 self.price = 0
+        
+        # 新订单 没有成交过
         self.traded = False #仅用于测试：市价单，当有成交后，市价单的价格将确定
         self.TransactTime = order.TransactTime #仅用于测试：市价单，当有后续消息来而导致插入订单簿时，生成的订单簿用此时戳
 
+        # 挂单数量
         self.qty = order.OrderQty    # 深圳2位小数;上海3位小数
 
         ## 位宽及精度舍入可行性检查
@@ -156,7 +163,9 @@ class ob_order():
         if self.qty >= (1<<QTY_BIT_SIZE):
             axob_logger.error(f'{order.SecurityID:06d} order ApplSeqNum={order.ApplSeqNum} Volumn={order.OrderQty} ovf!')
 
+        # 如果限价单 不是溢出值, 下面做检查
         if self.type==TYPE.LIMIT and order.Price!=msg_util.ORDER_PRICE_OVERFLOW:   #检查限价单价格是否溢出；市价单价格是无效值，不可参与检查
+
             if order.SecurityIDSource==SecurityIDSource_SZSE:
                 if instrument_type==INSTRUMENT_TYPE.STOCK and order.Price % SZSE_STOCK_PRICE_RD:
                     axob_logger.error(f'{order.SecurityID:06d} order SZSE STOCK ApplSeqNum={order.ApplSeqNum} Price={order.Price} precision dnf!')  #当被前端处理成0x7fff_ffff时 会有余数
@@ -167,18 +176,6 @@ class ob_order():
             elif order.SecurityIDSource==SecurityIDSource_SSE:
                 if instrument_type==INSTRUMENT_TYPE.STOCK and order.Price % SSE_STOCK_PRICE_RD:
                     axob_logger.error(f'{order.SecurityID:06d} order SSE STOCK ApplSeqNum={order.ApplSeqNum} Price={order.Price} precision dnf!')
-
-    def save(self):
-        '''save/load 用于保存/加载测试时刻'''
-        data = {}
-        for attr in self.__slots__:
-            value = getattr(self, attr)
-            data[attr] = value
-        return data
-
-    def load(self, data):
-        for attr in self.__slots__:
-            setattr(self, attr, data[attr])
 
 
 class ob_exec():
@@ -320,7 +317,7 @@ class AXOB():
         'instrument_type',
 
         'order_map',    # map of ob_order, 保存了 所有的 委托号对应的订单详情, 当收到撤单或成交消息时 有时只有订单号需要根据订单号找到价格和数量
-        'illegal_order_map',    # map of illegal_order  保存因超出涨跌幅限制或其他原因被判为非法但尚未处理完毕的订单（主要用于创业板无涨跌幅限制期间的特殊逻辑）
+        'illegal_order_map',    # map of illegal_order  保存因超出涨跌幅限制或其他原因被判为非法但尚未处理完毕的订单（主要用于创业板无涨跌幅限制期间的特殊逻辑）  seqnum 是key, order 对象是 value
         'bid_level_tree', # map of level_node  买方/卖方价格树。以价格为 Key，保存该价位上的总挂单量（Qty）
         'ask_level_tree', # map of level_node  同上
 
@@ -372,6 +369,7 @@ class AXOB():
         # 缓存“待定”订单
         # 当收到一个市价单或本方最优单时，由于不知道具体的成交价格（取决于当时的对手盘），不能立即插入订单簿。系统将其暂存在 holding_order 中
         # 紧接着收到对应的逐笔成交消息时，利用成交消息中的价格来确定 holding_order 的实际价格，处理完所有成交后，再将剩余部分（如果有）插入 order_map 和价格树
+        # 如果收到了新的委托, 表示上一个委托已经结束了撮合, 需要处理 holding_order
         'holding_order',  # 保存了 ob_order 对象
         'holding_nb',     # 计数
 
@@ -388,6 +386,7 @@ class AXOB():
         'bid_cage_ref_px', # 基准价格。笼子的参考锚点，通常随成交价或一档价格变动
         'ask_cage_ref_px', # 基准价格。笼子的参考锚点，通常随成交价或一档价格变动
 
+        # 标记“由于盘口最优价格的变化，可能导致原本在笼子外的隐藏订单进入笼子”这一状态，以便正确处理随后的成交消息
         'bid_waiting_for_cage',  # 护哪些订单在“笼子内”（参与撮合），哪些在“笼子外”（暂时隐藏）
         'ask_waiting_for_cage',  # 当一笔成交发生导致 LastPx（最新价）变化，进而导致 ref_px（基准价）变化时，系统会检查这些字段，将原本在笼子外的订单“释放”进入核心订单簿（...level_tree），或将新订单关入笼子
 
@@ -744,24 +743,34 @@ class AXOB():
         逐笔订单入口，统一提取市价单、限价单的关键字段到内部订单格式
         跳转到处理限价单或处理撤单
         '''
-        self.DBG(f'msg#{self.msg_nb} onOrder:{order}')
+        # self.WARN(f'msg#{self.msg_nb} onOrder:{order}')
         
+        # 处理上一笔的市价单
         if self.holding_nb!=0: #把此前缓存的订单(市价/限价)插入LOB
+            # 如果市价单 但是没有成交过, 那报个错
             if self.holding_order.type == TYPE.MARKET and not self.holding_order.traded:
                 self.ERR(f'市价单 {self.holding_order} 未伴随成交')
+            
+            # 上一笔订单入簿
             self.insertOrder(self.holding_order)
+            # 清理状态
             self.holding_nb = 0
 
+            # 把缓存的订单时间 修正刀 当前状态里面
             self._useTimestamp(self.holding_order.TransactTime)
             self.genSnap()   #先出一个snap，时戳用市价单的
             self._useTimestamp(order.TransactTime)
 
+
+        # 创建一个当前模块的 临时 订单对象
         if self.SecurityIDSource == SecurityIDSource_SZSE:
             _order = ob_order(order, self.instrument_type)
         elif self.SecurityIDSource == SecurityIDSource_SSE:
             # order or cancel
             if order.Type_str=='新增':
                 _order = ob_order(order, self.instrument_type)
+            
+            # 上海的 撤单 是在 委托回报中的
             elif order.Type_str=='删除':
                 if order.Side_str=='买入':
                     Side=SIDE.BID
@@ -772,6 +781,7 @@ class AXOB():
                 return
         else:
             return
+
 
         if _order.type==TYPE.MARKET:
             # 市价单，都必须在开盘之后
@@ -805,65 +815,145 @@ class AXOB():
 
 
     def onLimitOrder(self, order:ob_order):
-        if self.TradingPhaseMarket==axsbe_base.TPM.OpenCall or self.TradingPhaseMarket==axsbe_base.TPM.CloseCall:
-            #集合竞价期间，直接插入
-            # if self.TradingPhaseMarket==axsbe_base.TPM.CloseCall and self.holding_nb!=0: #进入收盘集合竞价，但可能有市价单还在确认
-            #     self.insertOrder(self.holding_order)
-            #     self.holding_nb = 0
+        # 集合竞价期间 (OpenCall / CloseCall)
+        #    直接入列：集合竞价期间不立即撮合，所有订单（除了非法的）通常直接插入订单簿。
+        #    创业板特殊处理：如果是创业板（GEM）且价格超过了特定的有效范围（如无涨跌停限制时的过高/过低价格），可能会被标记为废单或存入 illegal_order_map。
+        #    生成快照：每次插入后，立即调用 genSnap() 生成一个新的快照，反映当前的集合竞价状态。
+        # 连续竞价期间 (AMTrading / PMTrading)
+        #    价格笼子检查 (创业板)：如果超出笼子 (outOfCage=True)：调用 insertOrder(..., outOfCage=True) 将其作为“隐藏单”插入（不参与撮合，不展示在盘口，但需记录在案），并生成快照
+        # 波动性中断 (VolatilityBreaking)：
+        #    如果有新订单到达，通常意味着临停结束，进入了临时的集合竞价状态。 直接调用 insertOrder 插入订单，并生成快照。
 
-            if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM and self.UpLimitPx==msg_util.ORDER_PRICE_OVERFLOW and \
-               ((self.TradingPhaseMarket==axsbe_base.TPM.OpenCall and \
-                 (order.side==SIDE.BID and order.price>self.PrevClosePx*CYB_ORDER_ENVALUE_MAX_RATE))\
-                or
-                (self.TradingPhaseMarket==axsbe_base.TPM.CloseCall and \
-                 (order.price>msg_util.CYB_match_upper(self.LastPx) or order.price<msg_util.CYB_match_lower(self.LastPx)))):
-                self.illegal_order_map[order.applSeqNum] = order # 创业板无涨跌停时(上市头5日)超出范围则丢弃
+
+        # 如果是早盘集合竞价  或者 收盘集合竞价
+        if self.TradingPhaseMarket==axsbe_base.TPM.OpenCall or self.TradingPhaseMarket==axsbe_base.TPM.CloseCall:
+            # 这段代码是 深交所创业板（ChiNext） 在 无涨跌幅限制状态下（通常指新股上市前5个交易日），针对 集合竞价阶段（Open Call / Close Call） 的 有效申报价格范围检查与废单处理逻辑
+            # 如果订单判定为无效（Illegal），它将被放入 illegal_order_map 而不进入订单簿参与撮合
+
+            # 1. 初始化标记：默认不丢弃
+            should_discard = False
+
+            # 2. 创业板的特殊判断 必须是 创业板(GEM) 且 无涨跌幅限制(UpLimitPx为溢出值)
+            if self.market_subtype == MARKET_SUBTYPE.SZSE_STK_GEM and self.UpLimitPx == msg_util.ORDER_PRICE_OVERFLOW:
+                # 3. 第二层判断：根据交易阶段 (OpenCall vs CloseCall) 细分
+                if self.TradingPhaseMarket == axsbe_base.TPM.OpenCall:
+                    # [开盘集合竞价] 条件：买单 且 价格 > 昨日收盘价 * 最大倍率
+                    # 即便是无涨跌幅限制的新股，交易所为了防止乌龙指或恶意操纵，通常规定申报价格不得高于发行价/昨收价的 900%（即超过9倍）
+                    if order.side == SIDE.BID:
+                        if order.price > self.PrevClosePx * CYB_ORDER_ENVALUE_MAX_RATE:
+                            should_discard = True
+                            
+                elif self.TradingPhaseMarket == axsbe_base.TPM.CloseCall:
+                    # [收盘集合竞价] 条件：价格超出 匹配价格 的上下界
+                    # 为了清晰，先计算出上下界
+                    # 根据深交所交易规则，在无涨跌幅限制证券的收盘集合竞价阶段，申报价格不得高于最近成交价的 110% 且不得低于最近成交价的 90%
+                    upper_bound = msg_util.CYB_match_upper(self.LastPx)
+                    lower_bound = msg_util.CYB_match_lower(self.LastPx)
+                    
+                    if order.price > upper_bound or order.price < lower_bound:
+                        should_discard = True
+
+            # 4. 执行逻辑
+            # 如果是无效单
+            if should_discard:
+                # 创业板无涨跌停时(上市头5日)超出范围则丢弃
+                self.illegal_order_map[order.applSeqNum] = order
             else:
+                # 正常插入订单
                 self.insertOrder(order)
+
+                # 集合竞价阶段不存在“触发进笼”的动态博弈机制，所有未被废弃的合规订单应当立即参与撮合计算
+                # 关闭笼子检查
                 self.bid_waiting_for_cage = False
                 self.ask_waiting_for_cage = False
 
-            self.genSnap()   #可出snap
+            # 5. 最后生成快照 (无论是否丢弃都执行)
+            self.genSnap()
         else:
-            # if self.holding_nb!=0: #把此前缓存的订单(市价/限价)插入LOB
-            #     if self.holding_order.type == TYPE.MARKET and not self.holding_order.traded:
-            #         self.ERR(f'市价单 {self.holding_order} 未伴随成交')
-            #     self.insertOrder(self.holding_order)
-            #     self.holding_nb = 0
+            # 非集合竞价的分支, 连续竞价阶段
 
-            #     self._useTimestamp(self.holding_order.TransactTime)
-            #     self.genSnap()   #先出一个snap，时戳用市价单的
-            #     self._useTimestamp(order.TransactTime)
+            # -------------------------------------------------------------------------
+            # 1. 逻辑判断阶段：判断是否为创业板(GEM)价格笼子之外的废单/隐藏单
+            # -------------------------------------------------------------------------
+            is_gem_out_of_cage = False
 
-            if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM and order.type==TYPE.LIMIT and\
-                (order.side==SIDE.BID and (order.price>CYB_cage_upper(self.bid_cage_ref_px)) or
-                order.side==SIDE.ASK and (order.price<CYB_cage_lower(self.ask_cage_ref_px))):
+            # 第一层：必须是创业板 (ChiNext/GEM)
+            if self.market_subtype == MARKET_SUBTYPE.SZSE_STK_GEM:
+                # 第二层：必须是限价单 (L2中市价单和本方最优通常已有确定性处理，笼子主要针对限价)
+                if order.type == TYPE.LIMIT:
+                    # 第三层：区分买卖方向进行价格判定
+                    if order.side == SIDE.BID:
+                        # 买单：价格 > 基准价的102% (上沿)
+                        if order.price > CYB_cage_upper(self.bid_cage_ref_px):
+                            is_gem_out_of_cage = True
+                    
+                    elif order.side == SIDE.ASK:
+                        # 卖单：价格 < 基准价的98% (下沿)
+                        if order.price < CYB_cage_lower(self.ask_cage_ref_px):
+                            is_gem_out_of_cage = True
+
+            # 分支 A: 创业板价格笼子外的订单
+            if is_gem_out_of_cage:
+                # 标记为 outOfCage=True，通常意味着不参与当前撮合，但可能暂存或丢弃(视交易所规则)
                 self.insertOrder(order, outOfCage=True)
-                self.genSnap()   #出一个snap
-            elif self.TradingPhaseMarket==axsbe_base.TPM.VolatilityBreaking:
-                #波动性中断(有新order表示临停结束，正在集合竞价)，直接插入
+                self.genSnap() # 状态改变，生成快照
+
+            # 分支 B: 波动性中断 (Volatility Breaking)  elif 意味着如果命中了笼子逻辑，就不走波动性中断逻辑
+            elif self.TradingPhaseMarket == axsbe_base.TPM.VolatilityBreaking:
+                # 波动性中断期间收到新订单，通常意味着临停结束，进入集合竞价阶段
+                # 此时直接插入订单簿
                 self.insertOrder(order)
-
-                self.genSnap()   #可出snap
+                self.genSnap() # 状态改变，生成快照
             else:
-                #若是市价单或可能成交的限价单，则缓存住，等成交
-                if order.type==TYPE.MARKET:
+                # 逻辑分支：判断是市价单、跨价限价单（需缓存等待成交），还是普通限价单（直接插入）
+                
+                # 1. 判断是否为市价单, 市价单 暂存起来
+                if order.type == TYPE.MARKET:
                     self.holding_order = order
                     self.holding_nb += 1
-                    self.DBG('hold MARET-order')
-                elif (order.side==SIDE.BID and (order.price >= self.ask_min_level_price and self.ask_min_level_qty > 0)) or \
-                (order.side==SIDE.ASK and (order.price <= self.bid_max_level_price and self.bid_max_level_qty > 0)):
-                    self.holding_order = order
-                    self.holding_nb += 1
-                    self.DBG('hold LIMIT-order')
-                    self.bid_waiting_for_cage = False
-                    self.ask_waiting_for_cage = False
+                    self.DBG('hold MARKET-order')
+                
+                # 2. 判断是否为限价单
                 else:
-                    self.insertOrder(order)
-                    if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM:
-                        self.enterCage()
+                    # 初始化标志位：判断该限价单是否跨越了买卖价差（即是否会立即成交）
+                    is_crossing_spread = False
 
-                    self.genSnap()   #再出一个snap
+                    if order.side == SIDE.BID:
+                        # 买单逻辑：如果卖方有挂单，且买价 >= 卖一价
+                        if self.ask_min_level_qty > 0:
+                            if order.price >= self.ask_min_level_price:
+                                is_crossing_spread = True
+                    
+                    elif order.side == SIDE.ASK:
+                        # 卖单逻辑：如果买方有挂单，且卖价 <= 买一价
+                        if self.bid_max_level_qty > 0:
+                            if order.price <= self.bid_max_level_price:
+                                is_crossing_spread = True
+
+                    # 3. 根据是否跨价决定后续操作
+                    # 如果能满足成交, 那先缓存, 等待后续的成交回报(因为后续肯定会接着一个成交回报)
+                    if is_crossing_spread:
+                        # 情况 A: 跨价限价单，缓存住，等待后续成交消息确认
+                        self.holding_order = order
+                        self.holding_nb += 1
+                        self.DBG('hold LIMIT-order')
+                        
+                        # 因为发生了即时成交，价格笼子等待状态重置
+                        # 意味着这个限价单的价格已经“穿过”了对手方的一档价格（买价 $\ge$ 卖一价，或 卖价 $\le$ 买一价）。这意味着必然会立即发生交易
+                        # 根据交易所规则，订单必须先与当前订单簿上可见的最优价格进行撮合
+                        # 如果此时 waiting_for_cage 为 True，意味着“可能有隐藏订单等待进入”。如果在撮合前执行了“进笼子”逻辑，可能会把本不该参与当前撮合的隐藏订单拉进来，或者改变了基准价
+                        # 此时即将发生撮合交易，必须冻结价格笼子的状态，防止隐藏订单在成交前错误地‘插队’或干扰当前撮合
+                        self.bid_waiting_for_cage = False
+                        self.ask_waiting_for_cage = False
+                    else:
+                        # 情况 B: 普通限价单（未成交），直接插入订单簿
+                        self.insertOrder(order)
+                        
+                        # 创业板特殊处理：尝试入笼
+                        if self.market_subtype == MARKET_SUBTYPE.SZSE_STK_GEM:
+                            self.enterCage()
+
+                        self.genSnap()   # 生成快照
 
     def insertOrder(self, order:ob_order, outOfCage=False):
         '''
