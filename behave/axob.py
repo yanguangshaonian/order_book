@@ -368,6 +368,8 @@ class AXOB():
         'ask_cage_ref_px', # 基准价格。笼子的参考锚点，通常随成交价或一档价格变动
 
         # 标记“由于盘口最优价格的变化，可能导致原本在笼子外的隐藏订单进入笼子”这一状态，以便正确处理随后的成交消息
+        # 他为 true 意味着 买/卖 一价（Best Bid）发生了变化, 参考价可能随之改变, 笼子的范围也可能平移
+        # 当一个新的限价单插入，且价格优于当前最优价（买单更高，或卖单更低）时，会改变对手方的参考价
         'bid_waiting_for_cage',  # 护哪些订单在“笼子内”（参与撮合），哪些在“笼子外”（暂时隐藏）
         'ask_waiting_for_cage',  # 当一笔成交发生导致 LastPx（最新价）变化，进而导致 ref_px（基准价）变化时，系统会检查这些字段，将原本在笼子外的订单“释放”进入核心订单簿（...level_tree），或将新订单关入笼子
 
@@ -927,6 +929,8 @@ class AXOB():
                         # 意思就是别管价格笼子了，现在有单子要成交！先专心处理成交（Hold住等Exec消息），等成交完了，价格定了，我们再去 onExec 里重新计算笼子的问题
                         self.bid_waiting_for_cage = False
                         self.ask_waiting_for_cage = False
+
+                        # 结束处理了, 不如簿
                     else:
                         # 非即时成交的普通限价单
                         # 情况 B: 普通限价单（未成交），直接插入订单簿
@@ -997,7 +1001,7 @@ class AXOB():
                         # 既然“卖方笼子基准价”变了（可能变高了），那么卖方笼子上限可能提高。
                         # 必须通知系统去检查是否有卖方隐藏单可以放出来。
                         # 这个函数退出之后, 会返回到 OnLimitOrder 中, 判断 是否创业板特殊处理：尝试入笼, 然后执行 self.enterCage()
-                        self.ask_waiting_for_cage = True if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM else False
+                        self.ask_waiting_for_cage = self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM
                 else:
                     # 这是个笼子外的单子
                     # 逻辑：我们要找“笼子上面，离笼子最近（价格最低）的那个买单”
