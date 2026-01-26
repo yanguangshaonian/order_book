@@ -930,13 +930,14 @@ class AXOB():
                         self.bid_waiting_for_cage = False
                         self.ask_waiting_for_cage = False
 
-                        # 结束处理了, 不如簿
+                        # 结束处理了, 不入簿
                     else:
                         # 非即时成交的普通限价单
                         # 情况 B: 普通限价单（未成交），直接插入订单簿
                         self.insertOrder(order)
                         
                         # 创业板特殊处理：尝试入笼
+                        # 这里需要满足  连续竞价阶段, 并且ob_order的价格在创业板价格笼子内
                         if self.market_subtype == MARKET_SUBTYPE.SZSE_STK_GEM:
                             self.enterCage()
 
@@ -955,12 +956,12 @@ class AXOB():
         self.order_map[order.applSeqNum] = order
         
         if order.side == SIDE.BID:
-            self._export_level_access(f'LEVEL_ACCESS BID locate {order.price} //insertOrder')
+            # self._export_level_access(f'LEVEL_ACCESS BID locate {order.price} //insertOrder')
             # 如果订单簿已经存在这个价格
             if order.price in self.bid_level_tree:
                 # 直接增加这个价格的对应的量
                 self.bid_level_tree[order.price].qty += order.qty
-                self._export_level_access(f'LEVEL_ACCESS BID writeback {order.price} //insertOrder')
+                # self._export_level_access(f'LEVEL_ACCESS BID writeback {order.price} //insertOrder')
 
                 # 判断价格身份 
 
@@ -976,14 +977,14 @@ class AXOB():
                 node = level_node(order.price, order.qty, order.applSeqNum)
                 self.bid_level_tree[order.price] = node
 
-                self._export_level_access(f'LEVEL_ACCESS BID insert {order.price} //insertOrder')
-
+                # self._export_level_access(f'LEVEL_ACCESS BID insert {order.price} //insertOrder')
+                # 插入订单之后, 再检查是否要修正缓存, 需要判断, 只有没出笼的才需要判断更新
                 # 如果没有超过了价格笼子, 说明是个有效订单, 可以参与撮合, 并对外展示
                 if not outOfCage:
 
                     # 判断是否刷新了买一价
                     #     当前还没买单 或者 新价格 > 当前买一价
-                    if self.bid_max_level_qty==0 or order.price>self.bid_max_level_price:  #买方出现更高价格
+                    if self.bid_max_level_qty==0 or order.price>self.bid_max_level_price:  #买方出现更高价格, 比现有买一价高, 但是没有出笼子(上方判断)
                         self.bid_max_level_price = order.price  # 更新缓存
                         self.bid_max_level_qty = order.qty      # 更新缓存
 
@@ -1001,7 +1002,7 @@ class AXOB():
                         # 既然“卖方笼子基准价”变了（可能变高了），那么卖方笼子上限可能提高。
                         # 必须通知系统去检查是否有卖方隐藏单可以放出来。
                         # 这个函数退出之后, 会返回到 OnLimitOrder 中, 判断 是否创业板特殊处理：尝试入笼, 然后执行 self.enterCage()
-                        self.ask_waiting_for_cage = self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM
+                        self.ask_waiting_for_cage: bool = self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM
                 else:
                     # 这是个笼子外的单子
                     # 逻辑：我们要找“笼子上面，离笼子最近（价格最低）的那个买单”
@@ -1011,7 +1012,7 @@ class AXOB():
                     # 2. (当前还没有候补记录) OR (新订单价格 < 当前记录的候补价格), 
                     #    假设基准价 10.00，笼子上限 10.20。 隐藏队列里有个 10.25 的单子（这是当前的“守门员”，因为它是最接近 10.20 的）。
                     #    现在来了一个 10.22 的单子。10.22 虽然也超出了 10.20（进不去笼子），但它比 10.25 更接近笼子。10.22 < 10.25，条件成立。新的守门员成立
-                    # 这里直接比较order.price>self.bid_cage_ref_px 没问题, 当前order的价格已经经过函数外部判断, 通过outOfCage传进来 说明已经大于基准价格了这里再防御性的判断一下
+                    # 这里判断冗余了, 直接比较order.price>self.bid_cage_ref_px 没问题 , 当前order的价格已经经过函数外部判断, 通过outOfCage传进来 说明已经大于基准价格了这里再防御性的判断一下
                     if order.price>self.bid_cage_ref_px and\
                         (self.bid_cage_upper_ex_min_level_qty==0 or order.price<self.bid_cage_upper_ex_min_level_price): #买方笼子之上出现更低价
                         # 更新候补信息
@@ -1019,20 +1020,20 @@ class AXOB():
                         self.bid_cage_upper_ex_min_level_qty = order.qty
                         self.DBG(f'Refresh bid_cage_upper_ex_min_level_price={self.bid_cage_upper_ex_min_level_price} by new price')
 
-            # 没进笼子的都统计一下
+            # 没进笼子的都统计一下, 买方委托总量以及 买方委托总金额
             if not outOfCage:
                 self.BidWeightSize += order.qty
                 self.BidWeightValue += order.price * order.qty
 
         elif order.side == SIDE.ASK:
-            self._export_level_access(f'LEVEL_ACCESS ASK locate {order.price} //insertOrder')
+            # self._export_level_access(f'LEVEL_ACCESS ASK locate {order.price} //insertOrder')
 
             # 如果已经存在订单
             if order.price in self.ask_level_tree:
                 # 直接累加上去
                 self.ask_level_tree[order.price].qty += order.qty
-                self._export_level_access(f'LEVEL_ACCESS ASK writeback {order.price} //insertOrder')
-                # 刷新最优价格的成交量
+                # self._export_level_access(f'LEVEL_ACCESS ASK writeback {order.price} //insertOrder')
+                # 刷新最优价格的成交量, 这是卖一价的成交量
                 if order.price==self.ask_min_level_price:
                     self.ask_min_level_qty += order.qty
 
