@@ -357,7 +357,7 @@ class AXOB():
         'TradingPhaseMarket',     # 市场交易阶段
         # 'VolatilityBreaking_end_tick',
 
-        'AskWeightPx_uncertain',    # 卖方加权均价不确定标志
+        'AskWeightPx_uncertain',    # 卖方加权均价不确定标志, insertOrder的时候, order.price==PRICE_MAXIMUM 的订单这个字段会被设置为 true
 
         'market_subtype',  # 市场子类型（主板/创业板/科创板等）。
         'bid_cage_upper_ex_min_level_price', # 买方笼子上限之外的最低价格档（及其数量） 买一价的头号候补梯队的兵力, 紧贴这买一价
@@ -1043,7 +1043,7 @@ class AXOB():
             else:
                 node = level_node(order.price, order.qty, order.applSeqNum)
                 self.ask_level_tree[order.price] = node
-                self._export_level_access(f'LEVEL_ACCESS ASK insert {order.price} //insertOrder')
+                # self._export_level_access(f'LEVEL_ACCESS ASK insert {order.price} //insertOrder')
 
                 if order.price==PRICE_MAXIMUM:
                     self.AskWeightPx_uncertain = True #价格越界后，卖出均价将无法确定
