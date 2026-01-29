@@ -73,8 +73,8 @@ class axsbe_snap_stock(axsbe_base.axsbe_base):
         'OpenPx',
         'HighPx',
         'LowPx',
-        'BidWeightPx',              #SH-BOND.AltWeightedAvgBidPx
-        'BidWeightSize',            #SH-BOND.TotalBidQty
+        'BidWeightPx',              #SH-BOND.AltWeightedAvgBidPx   买方总委托金额
+        'BidWeightSize',            #SH-BOND.TotalBidQty           买方总委托量
         'AskWeightPx',              #SH-BOND.AltWeightedAvgOfferPx
         'AskWeightSize',            #SH-BOND.TotalOfferQty
         'UpLimitPx',                #SZ

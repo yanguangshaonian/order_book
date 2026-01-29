@@ -366,7 +366,8 @@ class AXOB():
         'ask_cage_lower_ex_max_level_qty',   # 卖方笼子下限之外的最高价格档。
         'bid_cage_ref_px', # 基准价格。笼子的参考锚点，通常随成交价或一档价格变动, 用来计算买方价格笼子的上限 (Upper Limit)
         'ask_cage_ref_px', # 基准价格。笼子的参考锚点，通常随成交价或一档价格变动
-
+        # 基准价获取顺序为：对手方一档 -> 本方一档 -> 最近成交价.
+        
         # 标记“由于盘口最优价格的变化，可能导致原本在笼子外的隐藏订单进入笼子”这一状态，以便正确处理随后的成交消息
         # 他为 true 意味着 买/卖 一价（Best Bid）发生了变化, 参考价可能随之改变, 笼子的范围也可能平移
         # 当一个新的限价单插入，且价格优于当前最优价（买单更高，或卖单更低）时，会改变对手方的参考价
@@ -934,10 +935,12 @@ class AXOB():
                     else:
                         # 非即时成交的普通限价单
                         # 情况 B: 普通限价单（未成交），直接插入订单簿
+                        # 没有即时成交, 说明 新的价格 卡在了 买一和卖一中间, 更新买一价和卖一价
                         self.insertOrder(order)
                         
                         # 创业板特殊处理：尝试入笼
                         # 这里需要满足  连续竞价阶段, 并且ob_order的价格在创业板价格笼子内
+                        # 卡在买/卖 一之间 说明有新的基准价格, 更新一下笼子
                         if self.market_subtype == MARKET_SUBTYPE.SZSE_STK_GEM:
                             self.enterCage()
 
@@ -1048,26 +1051,42 @@ class AXOB():
                 if order.price==PRICE_MAXIMUM:
                     self.AskWeightPx_uncertain = True #价格越界后，卖出均价将无法确定
 
+                # 没有出笼子
+                # 如果没有超过了价格笼子, 说明是个有效订单, 可以参与撮合, 并对外展示
                 if not outOfCage:
-                    if self.ask_min_level_qty==0 or order.price<self.ask_min_level_price: #卖方出现更低价格
+                    # 如果卖一量为0, 或者 当前价格 比卖一价还要低, 说明卖方出现更低价格
+                    if self.ask_min_level_qty==0 or order.price<self.ask_min_level_price: 
                         self.ask_min_level_price = order.price
                         self.ask_min_level_qty = order.qty
 
+                        # 新的卖一价导致 买方笼子基准价可能变了
                         self.bid_cage_ref_px = order.price
-                        self.DBG(f'Bid cage ref px={self.bid_cage_ref_px}')
+                        # self.DBG(f'Bid cage ref px={self.bid_cage_ref_px}')
+
+                        # 如果没有买方, 那么卖方笼子的价格 可以暂时用卖一价
                         if not self.bid_max_level_qty:  #没有对手价
                             self.ask_cage_ref_px = order.price
-                            self.DBG(f'Ask cage ref px={self.ask_cage_ref_px}')
-                        self.bid_waiting_for_cage = True if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM else False
+                            # self.DBG(f'Ask cage ref px={self.ask_cage_ref_px}')
+
+                        # 最优价格变化 导致 笼子需要平移
+                        self.bid_waiting_for_cage = self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM
                 else:
-                    self.DBG('Ask order out of cage.')
+                    # 出笼子了
+                    # 如果委托价格比 基准价格低(废话), 并且, (目前笼子外还没有委托 或者 当前委托价格 大于 笼子外的最低价格)
+                    # 就是价格 小于 ask_cage_ref_px 但是 大于 卖方笼子的外的最高价格, 那就更新卖方笼子外的最高价格 
+
+
+                    # self.DBG('Ask order out of cage.')
+
                     if order.price<self.ask_cage_ref_px and\
-                        (self.ask_cage_lower_ex_max_level_qty==0 or order.price>self.ask_cage_lower_ex_max_level_price): #买方笼子之下出现更高价
+                        (self.ask_cage_lower_ex_max_level_qty==0 or order.price>self.ask_cage_lower_ex_max_level_price): #卖方笼子之下出现更高价
                         self.ask_cage_lower_ex_max_level_price = order.price
                         self.ask_cage_lower_ex_max_level_qty = order.qty
-                        self.DBG(f'Refresh ask_cage_lower_ex_max_level_price={self.ask_cage_lower_ex_max_level_price} by new price')
+                        # self.DBG(f'Refresh ask_cage_lower_ex_max_level_price={self.ask_cage_lower_ex_max_level_price} by new price')
 
+            # 没有出笼子
             if not outOfCage:
+                # 还属于集合竞价, 并且 价格超过昨收若干倍
                 if self.TradingPhaseMarket==axsbe_base.TPM.OpenCall and order.price>self.PrevClosePx*CYB_ORDER_ENVALUE_MAX_RATE:  #从深交所数据上看，超过昨收(新股时为上市价)若干倍的委托不会参与统计
                     self.AskWeightSizeEx += order.qty
                     self.AskWeightValueEx += order.price * order.qty
@@ -1205,30 +1224,55 @@ class AXOB():
 
     def enterCage(self):
         '''判断订单是否可进入笼子，若进入笼子，判断是否可以成交'''
+        # 在创业板中，只有价格在基准价一定范围内（通常是 正负2%）的订单才是有效的。超出范围的订单会被暂时“隐藏”在笼子外。当基准价发生变化，笼子范围移动，原本在笼子外的订单可能“进入笼子”成为有效订单
+        # 这个函数是一个死循环（While True），因为买方订单进入笼子会改变买一价，从而改变卖方的基准价，可能诱发卖方订单进入笼子，卖方变化又反过来影响买方，形成连锁反应
+        # 任何可能导致“基准价”（Reference Price）发生变化的事件，都必须触发
+        # 卖方笼子基准价 约等于 买一价 (Bid 1), 买方笼子基准价 约等于 卖一价 (Ask 1)
+        # 基准价获取顺序为：对手方一档 -> 本方一档 -> 最近成交价.
+
+        # 进笼推演 -> 发现成交可能 -> 立即暂停 -> 等实锤（逐笔成交）
+        # 一旦有新订单进入笼子, 那就触发连锁反应, 直到找到第一个能够立即成交的单子,然后退出循环等待交易所来驱动下一步的动作
         while True:
+            # 检查是否存在笼子外的买单（数量不为0）, 并且隐藏订单的价格 小于 基准价格的102%, 说明这个上限外 最低的买方隐藏订单可以进笼子了
+            # 一旦进笼子 势必会修改 最优价格
             if self.bid_cage_upper_ex_min_level_qty and self.bid_cage_upper_ex_min_level_price<=CYB_cage_upper(self.bid_cage_ref_px): #买方隐藏订单可以进入笼子
+                # 检查刚进笼子的买单是否能立刻成交 
+                # self.ask_min_level_qty: 卖方有挂单
+                # self.bid_cage_upper_ex_min_level_price >= self.ask_min_level_price: 买价 >= 卖一价（满足成交条件）
+                # self.TradingPhaseMarket != ...VolatilityBreaking: 当前不是波动性中断状态（中断时不能成交）
                 if self.ask_min_level_qty and self.bid_cage_upper_ex_min_level_price>=self.ask_min_level_price and self.TradingPhaseMarket!=axsbe_base.TPM.VolatilityBreaking: #可与卖方最优成交
+                    # 如果能成交，不在这里处理更新逻辑，而是直接跳出循环。
+                    # 外部逻辑（如 onExec 或 genSnap）会处理成交导致的订单簿变化。
+
+                    # 在连续竞价阶段，订单簿的 买一价必须永远小于卖一价。
+                    # 等待“逐笔成交”驱动 (Event Driven)
+            
                     self.DBG(f'ASK px may changed: waiting for BID level' 
                              f'({self.bid_cage_upper_ex_min_level_price} x {self.bid_cage_upper_ex_min_level_qty}) to enter cage & exec')
                     break
                 else:   #无法成交，将隐藏订单加到买方队列
+                    # 修改买一价
                     self.bid_max_level_price = self.bid_cage_upper_ex_min_level_price
                     self.bid_max_level_qty = self.bid_cage_upper_ex_min_level_qty
                     self.BidWeightSize += self.bid_cage_upper_ex_min_level_qty
                     self.BidWeightValue += self.bid_cage_upper_ex_min_level_price * self.bid_cage_upper_ex_min_level_qty
                     self.DBG('BID order enter cage and became max level')
                     
+                    # 修改 卖方基准价格
                     self.ask_cage_ref_px = self.bid_max_level_price
-                    self.DBG(f'ASK cage ref px={self.ask_cage_ref_px}')
+                    # self.DBG(f'ASK cage ref px={self.ask_cage_ref_px}')
+
+                    # 如果卖方还没有对手盘, 那 买方的基准价格 暂时也由当前的买一价决定
                     if not self.ask_min_level_qty:
                         self.bid_cage_ref_px = self.bid_max_level_price
-                        self.DBG(f'Bid cage ref px={self.bid_cage_ref_px}')
+                        # self.DBG(f'Bid cage ref px={self.bid_cage_ref_px}')
 
-                    self.ask_waiting_for_cage = True if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM else False   #买方最优价被修改，则判断卖方隐藏订单
+                    # 买方的价格被修改了, 现在需要判断 卖方的隐藏订单
+                    self.ask_waiting_for_cage = self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM   #买方最优价被修改，则判断卖方隐藏订单
 
-                    #下一个隐藏订单，继续循环，直到无隐藏订单、隐藏订单可成交
+                    # 寻找下一个隐藏订单，继续循环，直到无隐藏订单、隐藏订单可成交
                     self.bid_cage_upper_ex_min_level_qty = 0
-                    self._export_level_access(f'LEVEL_ACCESS BID locate_higher {self.bid_cage_upper_ex_min_level_price} //enterCage:find next order out of cage')
+                    # self._export_level_access(f'LEVEL_ACCESS BID locate_higher {self.bid_cage_upper_ex_min_level_price} //enterCage:find next order out of cage')
                     for p, l in sorted(self.bid_level_tree.items(),key=lambda x:x[0], reverse=False):    #从小到大遍历
                         if p>self.bid_cage_upper_ex_min_level_price:
                             self.bid_cage_upper_ex_min_level_price = p
@@ -1236,39 +1280,66 @@ class AXOB():
                             self.DBG(f'Refresh bid_cage_upper_ex_min_level_price={self.bid_cage_upper_ex_min_level_price} by prev bid level enter cage')
                             break
             else:
+                # 买方最优价没有被修改
+                # 如果没有买单能进笼子，重置标记，表示不需要特意等待买方检查
                 self.bid_waiting_for_cage = False
 
-            if self.ask_cage_lower_ex_max_level_qty and self.ask_cage_lower_ex_max_level_price>=CYB_cage_lower(self.ask_cage_ref_px): #卖方隐藏订单可以进入笼子
+
+            # 逻辑背景：卖出价格不能过低。ask_cage_lower_ex_max_level 指的是“笼子下限之外”的订单中价格最高的那个。
+            # 如果基准价下跌，笼子下限降低，这个“下限外最高”的订单可能是第一个进入笼子的。
+
+            # 检查是否有卖方隐藏订单，且该订单价格满足新的笼子下限
+            # self.ask_cage_lower_ex_max_level_qty: 检查是否存在笼子外的卖单
+            # self.ask_cage_lower_ex_max_level_price >= CYB_cage_lower(...): 如果隐藏卖单价格 >= 新下限，说明它现在合法了（不再被视为恶意砸盘），可以“进笼”。
+
+            if self.ask_cage_lower_ex_max_level_qty and self.ask_cage_lower_ex_max_level_price>=CYB_cage_lower(self.ask_cage_ref_px):
+                # 检查刚进笼子的卖单是否能立刻成交
+                # self.bid_max_level_qty: 买方有挂单
+                # self.ask_cage_lower_ex_max_level_price <= self.bid_max_level_price: 卖价 <= 买一价（满足成交条件）
+                # self.TradingPhaseMarket != ...: 非波动性中断
                 if self.bid_max_level_qty and self.ask_cage_lower_ex_max_level_price<=self.bid_max_level_price and self.TradingPhaseMarket!=axsbe_base.TPM.VolatilityBreaking: #可与买方最优成交
+                    # 同样，如果能成交，跳出循环，交由外部逻辑处理成交
                     self.DBG(f'BID px may changed: waiting for ASK level'
                              f'({self.ask_cage_lower_ex_max_level_price} x {self.ask_cage_lower_ex_max_level_qty}) to enter cage & exec')
                     break
                 else:   #无法成交，将隐藏订单加到买方队列
+                    # 更新卖一价（ask_min）
                     self.ask_min_level_price = self.ask_cage_lower_ex_max_level_price
                     self.ask_min_level_qty = self.ask_cage_lower_ex_max_level_qty
+                    # 累加统计数据
                     self.AskWeightSize += self.ask_cage_lower_ex_max_level_qty
                     self.AskWeightValue += self.ask_cage_lower_ex_max_level_price * self.ask_cage_lower_ex_max_level_qty
                     self.DBG('ASK order enter cage and became min level')
 
+                    # 关键连锁逻辑：卖一价变了，会影响买方的基准价（bid_cage_ref_px）
                     self.bid_cage_ref_px = self.ask_min_level_price
-                    self.DBG(f'BID cage ref px={self.bid_cage_ref_px}')
+                    # self.DBG(f'BID cage ref px={self.bid_cage_ref_px}')
+
+                    # 特殊情况：如果买方本来是空的，卖方基准价参考自身卖一
                     if not self.bid_max_level_qty:
                         self.ask_cage_ref_px = self.ask_min_level_price
-                        self.DBG(f'Ask cage ref px={self.ask_cage_ref_px}')
+                        # self.DBG(f'Ask cage ref px={self.ask_cage_ref_px}')
 
-                    self.bid_waiting_for_cage = True if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM else False   #卖方最优价被修改，则判断买方隐藏订单
+                    # 因为买方基准价(bid_cage_ref_px)变了，需要通知下一轮循环去检查买方
+                    self.bid_waiting_for_cage = self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM   #卖方最优价被修改，则判断买方隐藏订单
 
+                    # 寻找下一个“笼子外最高卖单”
+                    # 当前的进来了，找剩下还在外面的卖单里价格最高的（最接近有效区间的）
                     self.ask_cage_lower_ex_max_level_qty = 0
-                    self._export_level_access(f'LEVEL_ACCESS ASK locate_lower {self.ask_cage_lower_ex_max_level_price} //enterCage:find next order out of cage')
+                    # self._export_level_access(f'LEVEL_ACCESS ASK locate_lower {self.ask_cage_lower_ex_max_level_price} //enterCage:find next order out of cage')
                     for p, l in sorted(self.ask_level_tree.items(),key=lambda x:x[0], reverse=True):    #从大到小遍历
                         if p<self.ask_cage_lower_ex_max_level_price:
                             self.ask_cage_lower_ex_max_level_price = p
                             self.ask_cage_lower_ex_max_level_qty = l.qty
-                            self.DBG(f'Refresh ask_cage_lower_ex_max_level_price={self.ask_cage_lower_ex_max_level_price} by prev ask level enter cage')
+                            # self.DBG(f'Refresh ask_cage_lower_ex_max_level_price={self.ask_cage_lower_ex_max_level_price} by prev ask level enter cage')
                             break
             else:
+                # 如果没有卖单能进笼子，重置标记
                 self.ask_waiting_for_cage = False
 
+            # 如果买方不需要等待检查笼子 (bid_waiting_for_cage is False)
+            # 且 卖方也不需要等待检查笼子 (ask_waiting_for_cage is False)
+            # 说明基准价已经稳定，没有新的订单因为基准价变化而进入笼子，连锁反应结束。
             if not self.bid_waiting_for_cage and not self.ask_waiting_for_cage:
                 break
 
@@ -1576,6 +1647,9 @@ class AXOB():
 
 
     def genSnap(self):
+        # 在生成快照前，必须确保没有“缓存中待处理”的订单
+        # 如果olding_nb > 0, 说明你预期马上会收到“逐笔成交”消息。此时订单簿处于“中间态”（不稳定），不应该生成快照
+        # 波动性中断）期间，交易暂停，可能会有订单挂在队列里无法成交，此时允许生成快照。
         assert self.TradingPhaseMarket==axsbe_base.TPM.VolatilityBreaking or self.holding_nb==0, f'{self.SecurityID:06d} genSnap but with holding'
 
         snap = None
@@ -1583,25 +1657,35 @@ class AXOB():
             # 无需生成
             pass
         elif self.TradingPhaseMarket==axsbe_base.TPM.OpenCall or self.TradingPhaseMarket==axsbe_base.TPM.CloseCall:
-            # 集合竞价快照
+            # 集合竞价阶段（9:15-9:25, 14:57-15:00）
+            # 调用 genCallSnap，内部包含“虚拟撮合”逻辑，计算参考成交价和虚拟买卖盘
             snap = self.genCallSnap()
         elif self.TradingPhaseMarket==axsbe_base.TPM.VolatilityBreaking:
+            # 波动性中断（临时停牌）
+            # 调用 genTradingSnap，但标记 isVolatilityBreaking=True，通常意味着不显示买卖盘或只显示特定状态
             snap = self.genTradingSnap(isVolatilityBreaking=True)
         elif self.TradingPhaseMarket==axsbe_base.TPM.Ending:
+            # 闭市后（15:00之后）
+            # 只有当收盘价计算完成（closePx_ready）后才生成最后一张快照
             if self.closePx_ready: #收盘价已经ready
                 snap = self.genTradingSnap()
         else:
-            # 连续竞价快照
+            # 连续竞价阶段（9:30-11:30, 13:00-14:57）
+            # 调用 genTradingSnap，直接提取买卖队列的前10档生成快照
             snap = self.genTradingSnap()
 
         if snap is not None:
+            # 标记卖方加权平均价是否可信（例如当有价格越界的订单导致加权价溢出时）。
             snap.AskWeightPx_uncertain = self.AskWeightPx_uncertain
+            # 对快照中的数值进行钳位处理（防止整数溢出，适应 SBE 协议的字段限制）。
             self._clipSnap(snap)
 
         ## 调试数据，仅用于测试算法是否正确：
         if snap is not None:
             self.DBG(snap)
 
+            # 连续竞价期间（上午或下午），卖一价必须严格大于买一价
+            # 如果出现 Bid >= Ask，说明有可以成交的订单没有成交，这意味着之前的逻辑（如 onLimitOrder 或 onExec）有漏网之鱼，模型状态错误。
             if (snap.TradingPhaseMarket==axsbe_base.TPM.AMTrading or snap.TradingPhaseMarket==axsbe_base.TPM.PMTrading) and\
                 len(snap.ask)>0 and snap.ask[0].Qty and len(snap.bid) and snap.bid[0].Qty:
                 assert snap.ask[0].Price>snap.bid[0].Price, f'{self.SecurityID:06d} bid.max({snap.bid[0].Price})/ask.min({snap.ask[0].Price}) NG'
@@ -1684,12 +1768,15 @@ class AXOB():
         # if self.msg_nb>=885:
         #    self._print_levels()
         #1. 查找 最低卖出价格档、最高买入价格档
-        _bid_max_level_price = self.bid_max_level_price
-        _bid_max_level_qty = self.bid_max_level_qty
-        _ask_min_level_price = self.ask_min_level_price
-        _ask_min_level_qty = self.ask_min_level_qty
+        _bid_max_level_price = self.bid_max_level_price  # 买方下一档价
+        _bid_max_level_qty = self.bid_max_level_qty      # 买方下一档量
+        _ask_min_level_price = self.ask_min_level_price  # 卖方下一档价
+        _ask_min_level_qty = self.ask_min_level_qty      # 卖方下一档量
 
-        #2. 初始 撮合成交价
+        # 2. 初始参考成交价 (Reference Price)
+        # 如果两边都空，价格为0
+        # 如果一边空，取另一边价格
+        # 如果都有，暂时设为0（后面算）
         if _bid_max_level_qty==0 and _ask_min_level_qty==0: #两边都无委托
             price = 0
         else: # 至少一边存在委托
@@ -1702,84 +1789,154 @@ class AXOB():
 
         
         #3. 初始 总成交数量 = 0
-        volumeTrade = 0
-        bid_Qty = 0
+        volumeTrade = 0  # 累计虚拟成交量（这是我们要计算的核心指标）
+        bid_Qty = 0      # 当前档位剩余未匹配买量
+        ask_Qty = 0      # 当前档位剩余未匹配卖量
         bid_trade_level_nb = 0
-        ask_Qty = 0
         ask_trade_level_nb = 0
         
-        #4. 撮合循环：
+        
+        # 如果昨天有收盘价就用昨收，有最近成交就用最近成交。这是用来在价格有分歧时“定锚”用的
         _ref_px = self.PrevClosePx if self.NumTrades==0 else self.LastPx
+
+        #4. 撮合循环：
         while True:  # 
+            # 条件：双方都有量，且买一价 >= 卖一价 (可以成交)
             if _bid_max_level_qty!=0 and _ask_min_level_qty!=0 and _bid_max_level_price >= _ask_min_level_price:    # 双方均有最优委托 且 双方最优价有交叉
+                # 加载当前档位的量（如果之前没加载过）
                 if bid_Qty == 0:
                     bid_Qty = _bid_max_level_qty
                 if ask_Qty == 0:
                     ask_Qty = _ask_min_level_qty
+                
+                # 这部分模拟了“吃单”过程，原则是成交量取决于量小的一方。
+                # 买量 大于等于 卖量
                 if bid_Qty >= ask_Qty:
-                    volumeTrade += ask_Qty
-                    bid_Qty -= ask_Qty
-                    ask_Qty = 0
+                    volumeTrade += ask_Qty # 1. 累计成交量：加上较小的卖方量
+                    bid_Qty -= ask_Qty     # 2. 买方剩余：减去已成交的量
+                    ask_Qty = 0            # 3. 卖方耗尽：当前卖一档全部吃光
 
-                    ask_trade_level_nb += 1
-                    if bid_Qty==ask_Qty:
+                    ask_trade_level_nb += 1 # 统计：卖方又成交了一个档位
+                    if bid_Qty==0:          # 特例：如果买也耗尽了
                         bid_trade_level_nb += 1
                 else:
-                    volumeTrade += bid_Qty
-                    ask_Qty -= bid_Qty
-                    bid_Qty = 0
+                    # 买量 小于 卖量
+                    volumeTrade += bid_Qty   # 1. 累计成交量：加上较小的买方量
+                    ask_Qty -= bid_Qty       # 2. 卖方剩余
+                    bid_Qty = 0              # 3. 买方耗尽
 
-                    bid_trade_level_nb += 1
+                    bid_trade_level_nb += 1  # 统计档位
 
-                if bid_Qty == 0 and ask_Qty == 0:   # 恰好双方数量相等。 
+                # 上面的 if else 操作后，必然有一方（或双方）的 Qty 变为 0，意味着需要移动价格指针到下一档
+
+
+                # 当买卖双方在当前重叠区间的量完全相等时，意味着在这个节点，价格是不确定的（在该区间内任意价格都能让这笔量成交）
+                if bid_Qty == 0 and ask_Qty == 0:   # 双方都为0了
+                    # 基准价在买一和卖一之间，直接取基准价
                     if _bid_max_level_price>=_ref_px and _ask_min_level_price<=_ref_px:   #
                         price = _ref_px
                     else:
+                        # 基准价在区间外，取离基准价最近的那个边界
                         if abs(_bid_max_level_price-_ref_px) < abs(_ask_min_level_price-_ref_px):
                             price = _bid_max_level_price
                         else:
                             price = _ask_min_level_price
 
+                # 买方指针移动 (Locate Next Bid)
+                # 如果买方当前档位被吃光了（bid_Qty == 0），需要寻找下一个更低的买单。
                 if bid_Qty == 0:
+                    # 关键点：如果买方没了但卖方还有，成交价暂时锚定在卖方价
                     if ask_Qty != 0:
                         price = _ask_min_level_price
+
                     # locate next lower bid level
-                    _bid_max_level_qty = 0
-                    self._export_level_access(f'LEVEL_ACCESS BID locate_lower {_bid_max_level_price} //callSnap:next side level')
-                    for p, l in sorted(self.bid_level_tree.items(),key=lambda x:x[0], reverse=True):    #从大到小遍历
-                        if p<_bid_max_level_price:
+                    # 下面开始寻找下一档
+                    _bid_max_level_qty = 0  # 清空旧量
+                    # self._export_level_access(f'LEVEL_ACCESS BID locate_lower {_bid_max_level_price} //callSnap:next side level')
+                    # 遍历买单树（从高到低）
+                    for p, l in sorted(self.bid_level_tree.items(),key=lambda x:x[0], reverse=True):
+                        if p<_bid_max_level_price: # 找到第一个比当前价格低的价格
                             # if price<=p:
                             #     price = p+1
-                            _bid_max_level_price = p
-                            _bid_max_level_qty = l.qty
-                            break
+                            _bid_max_level_price = p   # 更新买一价指针
+                            _bid_max_level_qty = l.qty # 更新买一量指针
+                            break                           # 找到即停止，准备下一轮撮合
 
                 if ask_Qty == 0:
                     if bid_Qty != 0:
-                        price = _bid_max_level_price
+                        price = _bid_max_level_price  # 如果卖方没了买方还有，价格锚定在买方价
                     # locate next higher ask level
                     _ask_min_level_qty = 0
-                    self._export_level_access(f'LEVEL_ACCESS ASK locate_higher {_ask_min_level_price} //callSnap:next side level')
+                    # self._export_level_access(f'LEVEL_ACCESS ASK locate_higher {_ask_min_level_price} //callSnap:next side level')
                     for p, l in sorted(self.ask_level_tree.items(),key=lambda x:x[0], reverse=False):    #从小到大遍历
-                        if p>_ask_min_level_price:
+                        if p>_ask_min_level_price:     # 找到第一个比当前价格高的价格
                             # if price>=p:
                             #     price = p-1
-                            _ask_min_level_price = p
-                            _ask_min_level_qty = l.qty
+                            _ask_min_level_price = p   # 更新卖一价指针
+                            _ask_min_level_qty = l.qty # 更新卖一量指针
                             break
 
-            else:   #后续买卖双方至少一方无委托，或价格无交叉
+            else:   #后续买卖双方至少一方无委托，或价格无交叉, （买一价 < 卖一价，不再有交叉）
+                
+                # 完美匹配场景：上一轮撮合双方量刚好耗尽
+                # 如果有一方还有剩余量（例如 bid_Qty > 0），那么成交价必然锁定在那个档位，不需要修正。只有当双方都耗尽，价格处于“真空地带”时，才需要检查之前定的 price 是否合理。
+
+                """
+                    这段代码是集合竞价撮合算法中处理**“价格分歧”与“最小剩余量”**原则的核心实现。
+                    它处理的是一种极其特殊的临界状态：完美匹配（Perfect Match）后，买卖双方剩下的第一档价格紧紧相邻（只差 1 分钱/1个Tick），且之前的定价逻辑（通常是基于基准价）可能导致了逻辑冲突或不满足最优规则。
+                    以下是深度解析：
+                    1. 代码干了什么？（操作层面）
+                        在进入这个 else 分支前，场景如下：
+                            状态：上一轮撮合双方筹码刚好全部抵消（ask_Qty==0 且 bid_Qty==0）。
+                            位置：买方剩的最高价（例如 10.00）和卖方剩的最低价（例如 10.01）只差 1 个 tick。
+                            触发：初步估算的 price 偏向了卖方（例如 10.01），需要决策最终到底定在 10.00 还是 10.01。
+                    代码执行了以下“二选一”的逻辑：
+                        1. 比较剩余盘口量： 对比 卖一剩单量 (_ask_min_level_qty) 和 买一剩单量 (_bid_max_level_qty)。
+                        2. 选择量小的一方
+
+深度解读：
+场景模拟： 假设撮合到最后，中间空出来了。
+买一剩：10.00元，有 1000手。
+卖一剩：10.01元，有 10手。
+基准价：10.05元（偏高）。
+冲突： 按照基准价原则，开盘价想往高了靠（10.01）。但如果定在 10.01：
+10.00 的买单显然不能成交（价格太低）。
+10.01 的卖单是可以成交的（价格匹配）。
+但是，因为之前是“完美匹配”，说明之前的量都消化了。现在定在 10.01，意味着这 10手 卖单虽然价格匹配，但没对手盘了（因为买方最高才 10.00）。
+此时，市场上的“未成交剩余量”就是这 10手。
+反之，如果定在 10.00：
+10.00 的买单可以成交。
+同样因为没对手盘（卖方最低 10.01），这 1000手 买单全部无法成交。
+此时，市场上的“未成交剩余量”就是 1000手。
+决策： 交易所规则要求剩余量最小。
+方案 A（定 10.01）：剩余 10 手。
+方案 B（定 10.00）：剩余 1000 手。
+结论：选择 方案 A。尽管 10.01 离买方心理价位远，但它留下的市场不平衡（Imbalance）最小。
+                """
                 if ask_Qty==0 and bid_Qty==0:   # 双方恰好成交，根据下一档价格，可能需要修正成交价
+                    
+                    # 初步估算的 price >= 卖方下一档价格（_ask_min_level_price）。
+                    # 如果又卖一量, 并且 价格 大于等于 卖一价,   那他穿透了卖1变成了 卖2或者3了
+                    # 如果成交价真的这么高，卖方下一档的订单理应成交，但它实际上没成交（因为循环退出了）。说明价格定高了，必须下调
                     if _ask_min_level_qty and price>=_ask_min_level_price: #成交价高于卖方下一档，必须修正到小于等于卖方下一档
+
+                        # 买方没单了，或者买方下一档价格 + 1个tick < 卖方下一档价格。说明买卖中间有缝隙
+                        # 直接把价格修到 卖一价 - 1。这是最安全的“天花板”价格，既不触发卖方成交，又尽可能接近基准价
                         if _bid_max_level_qty==0 or _bid_max_level_price+1<_ask_min_level_price:    # 买方下一档+1分钱 小于 卖方下一档，修到卖方下一档-1
                             price = _ask_min_level_price-1
                         else:
+                            # 如果没缝隙, 隐含条件：买方下一档 + 1 == 卖方下一档（仅差1个tick
+                            # 必须二选一：要么定在卖方价，要么定在买方价
+                            # 当买卖盘口紧邻（如买 10.00，卖 10.01），而计算出的价格需要修正时，通常遵循**“最小剩余量原则”**。
+                            # 如果卖方量更小，就让价格定在卖方价（10.01），并显示卖方剩余量
+                            # 这模拟了一种“试图吃掉卖方但没吃完”的状态，在快照上揭示出更小的 Imbalance（不平衡量），符合撮合原则
                             if _ask_min_level_qty <= _bid_max_level_qty:   # 卖方双方下一档只差一分钱，选量小的，同量卖方优先
+                                # 卖方量小
                                 price = _ask_min_level_price
-                                ask_Qty = _ask_min_level_qty
+                                ask_Qty = _ask_min_level_qty  # 关键：将卖方量作为“未匹配量”揭示
                             else:
                                 price = _bid_max_level_price
-                                bid_Qty = _bid_max_level_qty
+                                bid_Qty = _bid_max_level_qty  # 关键：将买方量作为“未匹配量”揭示
 
                     elif _bid_max_level_qty and price<=_bid_max_level_price: #成交价低于买方下一档，必须修正到大于等于买方下一档
                         if _bid_max_level_qty==0 or _ask_min_level_price>_bid_max_level_price+1: # 卖方下一档分钱 大于 买方下一档+1，修到买方下一档+1
@@ -1811,13 +1968,18 @@ class AXOB():
             else:   #无法撮合时，揭示多档
                 snap_ask_levels, snap_bid_levels = self._getLevels(show_level_nb)
         else: #可撮合时，揭示2档
-            snap_ask_levels[0] = price_level(price, volumeTrade)
+            # 意思就是 定在price 成交了 volumeTrade 手, 未成交ask_Qty 手, 告诉市场，目前大家公认的“开盘价”可能是多少，以及在这个价格能成多少手
+            # 2档 揭示卖方剩余未匹配量
+            snap_ask_levels[0] = price_level(price, volumeTrade)  
             snap_ask_levels[1] = price_level(0, ask_Qty)
+
+            # 将卖三（Ask 3）到卖十（Ask 10）全部清零。
             for i in range(2, show_level_nb):
                 snap_ask_levels[i] = price_level(0,0)
 
             snap_bid_levels[0] = price_level(price, volumeTrade)
             snap_bid_levels[1] = price_level(0, bid_Qty)
+            
             for i in range(2, show_level_nb):
                 snap_bid_levels[i] = price_level(0,0)
 
@@ -1834,6 +1996,7 @@ class AXOB():
             else:
                 raise Exception(f'genCallSnap for instrument_type={self.instrument_type} is not ready!')
         
+        # 设置固定参数（如代码、涨跌停价等）
         self._setSnapFixParam(snap_call)
 
         ## 本地维护参数
@@ -1886,46 +2049,62 @@ class AXOB():
         snap_bid_levels = {}
         lv = 0
         if not isVolatilityBreaking: #临停期间，各档均填0；非临停期间才从价格档中取值
-            self._export_level_access(f'LEVEL_ACCESS BID locate_lower {self.bid_max_level_price} x{level_nb} //tradingSnap:traverse side level')
-            for p, l in sorted(self.bid_level_tree.items(),key=lambda x:x[0], reverse=True):    #从大到小遍历
+            # 遍历买方价格树：sorted(..., reverse=True) 表示从大到小排序（买一价最高）
+            for p, l in sorted(self.bid_level_tree.items(),key=lambda x:x[0], reverse=True):
+                # 【关键逻辑：价格笼子过滤】
+                # bid_cage_upper_ex_min_level_qty==0: 表示没有被笼子隐藏的订单
+                # p < self.bid_cage_upper_ex_min_level_price: 或者当前价格 p 小于“笼子外最低价”（即 p 在笼子内）
                 if self.bid_cage_upper_ex_min_level_qty==0 or p<self.bid_cage_upper_ex_min_level_price:
+                    # 创建价格档位对象：将内部价格精度转换为快照精度，并填入数量
                     snap_bid_levels[lv] = price_level(self._fmtPrice_inter2snap(p), l.qty)
                     lv += 1
+                    # 如果填满了需要的档位数（如10档），就停止遍历
                     if lv>=level_nb:
                         break
+        
+        # 如果实际档位不足 10 档（例如只有 5 个买单），剩下的 5-9 档用 (0, 0) 填充
         for i in range(lv, level_nb):
             snap_bid_levels[i] = price_level(0, 0)
             
         snap_ask_levels = {}
         lv = 0
         if not isVolatilityBreaking: #临停期间，各档均填0；非临停期间才从价格档中取值
-            self._export_level_access(f'LEVEL_ACCESS ASK locate_higher {self.ask_min_level_price} x{level_nb} //tradingSnap:traverse side level')
+            # self._export_level_access(f'LEVEL_ACCESS ASK locate_higher {self.ask_min_level_price} x{level_nb} //tradingSnap:traverse side level')
+            # # 遍历卖方价格树：sorted(..., reverse=False) 表示从小到大排序（卖一价最低）
             for p, l in sorted(self.ask_level_tree.items(),key=lambda x:x[0], reverse=False):    #从小到大遍历
+                # 【关键逻辑：价格笼子过滤】
                 if self.ask_cage_lower_ex_max_level_qty==0 or p>self.ask_cage_lower_ex_max_level_price:
                     snap_ask_levels[lv] = price_level(self._fmtPrice_inter2snap(p), l.qty)
                     lv += 1
                     if lv>=level_nb:
                         break
+        # 填充剩余空档
         for i in range(lv, level_nb):
             snap_ask_levels[i] = price_level(0, 0)
 
 
+        # 根据证券类型（股票或可转债）创建对应的快照对象
         if self.instrument_type==INSTRUMENT_TYPE.STOCK or self.instrument_type==INSTRUMENT_TYPE.KZZ:
             snap = axsbe_snap_stock(SecurityIDSource=self.SecurityIDSource, source=f"AXOB-{level_nb}")
         else:
             self.WARN(f'genTradingSnap for instrument_type={self.instrument_type} is not ready!')
             return None # TODO: not ready [Mid priority]
+        
+        # 将构建好的买卖盘字典赋值给快照对象
         snap.ask = snap_ask_levels
         snap.bid = snap_bid_levels
         
         # 固定参数
+        # 设置固定参数：如证券代码、昨收价、涨跌停价等（这些在开盘前就确定了）
         self._setSnapFixParam(snap)
 
 
         # 本地维护参数
+        # 设置动态统计参数：从 AXOB 对象的当前状态中拷贝
         snap.NumTrades = self.NumTrades
         snap.TotalVolumeTrade = self.TotalVolumeTrade
         snap.TotalValueTrade = self.TotalValueTrade
+        # 设置并转换价格精度（内部高精度 -> 快照显示精度）
         snap.LastPx = self._fmtPrice_inter2snap(self.LastPx)
         snap.HighPx = self._fmtPrice_inter2snap(self.HighPx)
         snap.LowPx = self._fmtPrice_inter2snap(self.LowPx)
@@ -1939,23 +2118,28 @@ class AXOB():
             snap.AskWeightPx = 0
             snap.AskWeightSize = 0
         else:
+            # --- 买方加权价计算 ---
             if self.BidWeightSize != 0:
+                # round(V/S) ≈ int((V * 2 / S) + 1) / 2,  这里作者纯属显摆
                 snap.BidWeightPx = (int((self.BidWeightValue<<1) / self.BidWeightSize) + 1) >> 1 # 四舍五入
                 snap.BidWeightPx = self._fmtPrice_inter2snap(snap.BidWeightPx)
             else:
                 snap.BidWeightPx = 0
             snap.BidWeightSize = self.BidWeightSize
             
+            # --- 卖方加权价计算（逻辑同上）---
             if self.AskWeightSize != 0:
+                # round(V/S) ≈ int((V * 2 / S) + 1) / 2
                 snap.AskWeightPx = (int((self.AskWeightValue<<1) / self.AskWeightSize) + 1) >> 1 # 四舍五入
                 snap.AskWeightPx = self._fmtPrice_inter2snap(snap.AskWeightPx)
             else:
                 snap.AskWeightPx = 0
             snap.AskWeightSize = self.AskWeightSize
 
-        #最新的一个逐笔消息时戳
+        # 设置快照的时间戳（通常取最近一笔逐笔消息的时间）
         self._setSnapTimestamp(snap)
 
+        # 设置交易阶段代码（例如 'T' 表示连续竞价，'Normal' 表示正常交易状态）
         snap.update_TradingPhaseCode(self.TradingPhaseMarket, axsbe_base.TPI.Normal)
 
         return snap
