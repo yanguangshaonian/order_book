@@ -1654,7 +1654,7 @@ class AXOB():
 
         snap = None
         if self.TradingPhaseMarket < axsbe_base.TPM.OpenCall or self.TradingPhaseMarket > axsbe_base.TPM.Ending:
-            # 无需生成
+            # 还没开盘无需生成
             pass
         elif self.TradingPhaseMarket==axsbe_base.TPM.OpenCall or self.TradingPhaseMarket==axsbe_base.TPM.CloseCall:
             # 集合竞价阶段（9:15-9:25, 14:57-15:00）
