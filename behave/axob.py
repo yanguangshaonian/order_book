@@ -529,7 +529,7 @@ class AXOB():
                 # 如果不是处在波动性中断状态 (防止错误覆盖), 才进行状态切换
                 # 这里主动更新状态, 如果没有主动, 那就被动等待 MU广播进入 elif isinstance(msg, AX_SIGNAL): 的分支
                 # 这里如果 msg如果是波动性中断, 那这里是切换, 给self也赋值, 
-                # 在 onTrade中进行恢复到连续竞价阶段, 波动性中断（临停）结束的标志是进行一次集合竞价撮合。当这次撮合完成（即买卖盘不再交叉）时，状态就会切换回连续竞价。
+                # ps: 在 onTrade中进行恢复到连续竞价阶段, 波动性中断（临停）结束的标志是进行一次集合竞价撮合。当这次撮合完成（即买卖盘不再交叉）时，状态就会切换回连续竞价。
                 if self.TradingPhaseMarket!=axsbe_base.TPM.VolatilityBreaking:
                     # 那就把外部传来的消息内的状态 更新到当前对象中
                     self.TradingPhaseMarket = msg.TradingPhaseMarket # 只用逐笔，在阶段切换期间，逐笔和快照的速率不同，可能快照切了逐笔没切，或反过来，
