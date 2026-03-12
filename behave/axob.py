@@ -514,7 +514,7 @@ class AXOB():
                 # 这里会有问题, 所以放到了下面实现: 
                 #     1. 缓存单问题：在连续竞价结束瞬间，可能还有未处理的“缓存单”（holding_order，通常是等待成交的市价单或特定限价单）。
                 #          必须先处理完这些缓存单（尝试插入或撤销），然后再切换到收盘集合竞价状态。
-                #          新的信号处理逻辑显式检查了 if self.holding_nb == 0，确保了状态切换的安全性。
+                #          新的信号处理逻辑显式检查了 if self.holding_nb == 0，holding_nb!=0确保了状态切换的安全性。
                 # 所以下面的代码注释了
                 # if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM and self.TradingPhaseMarket==axsbe_base.TPM.PMTrading and msg.TradingPhaseMarket==axsbe_base.TPM.CloseCall:
                 #     # 创业板进入收盘集合竞价，敞开价格笼子，将外面的隐藏订单放进来
@@ -740,7 +740,7 @@ class AXOB():
             # 清理状态
             self.holding_nb = 0
 
-            # 把缓存的订单时间 修正刀 当前状态里面
+            # 把缓存的订单时间 修正到 当前状态里面
             self._useTimestamp(self.holding_order.TransactTime)
             self.genSnap()   #先出一个snap，时戳用市价单的
             self._useTimestamp(order.TransactTime)
@@ -777,6 +777,7 @@ class AXOB():
             #    * 即时成交剩余撤销申报：最后有撤单
             #    * 全额成交或撤销申报：最后有撤单
 
+        #本方最优找到价格
         elif _order.type==TYPE.SIDE:
             # 本方最优，两种可能：
             #    * 本方最优价格申报 转限价单
@@ -946,6 +947,49 @@ class AXOB():
 
                         self.genSnap()   # 生成快照
 
+                        """
+假设某只创业板股票当前的订单簿如下：
+买一 (Bid 1): 价格 10.00 元，数量 100 手
+买二 (Bid 2): 价格 9.80 元，数量 50 手
+
+由于买一是 10.00 元，模型在处理这笔买单时，触发了你提到的逻辑：
+self.bid_max_level_price = 10.00
+self.ask_cage_ref_px = 10.00  # 卖方笼子基准价锚定为买一价
+
+此时，对于即将到来的卖单，它的合法价格笼子范围是：
+下限 (Lower Limit): 10.00 * 98% = 9.80 元
+上限 (Upper Limit): 10.00 * 102% = 10.20 元
+
+动作 1：乌龙指卖单到达 (T1)
+此时，一个卖家极度悲观，直接以 9.70 元 挂出 50 手卖单。
+
+模型推演：
+拦截判定：卖单价格 9.70 < 笼子下限 9.80。这是一笔“出笼”的废单（不会上主订单簿）。
+状态隐藏：模型不会将 9.70 写入 self.ask_level_tree，而是将其暂存在“笼外卖单”变量中：
+self.ask_cage_lower_ex_max_level_price = 9.70
+self.ask_cage_lower_ex_max_level_qty = 50
+全市场视角： 这笔 9.70 的卖单被交易所主机隐匿，L2 快照的卖盘档位上根本看不到它。
+
+
+动作 2：买一主动撤单，基准价下移 (T2)
+原本在 10.00 元挂单的买家突然取消了那 100 手买单（撤单到达 onCancel 逻辑）。
+模型推演：
+买一档清空：10.00 元的买单被移除。
+买一价下移：买二（9.80 元）被推到了买一的位置。模型更新最优买价：
+self.bid_max_level_price = 9.80
+关键基准价重算：因为“对手方一档价格”变了，卖方笼子基准价随之联动下移：
+self.ask_cage_ref_px = 9.80
+此时，新的卖方价格笼子下限变成了：9.80 * 98% = 9.60 元（四舍五入）。
+
+动作 3：触发“进笼”释放与成交 (T3)
+在每次订单簿发生变动（如 T2 的撤单）后，模型会触发 enterCage() 函数检查暂存队列。
+
+模型推演：
+检查笼外卖单：发现 self.ask_cage_lower_ex_max_level_price (9.70 元)。
+进笼判定：此时 9.70 元 已经 大于 新的笼子下限 9.60 元。
+释放：这笔原本被隐藏的 50 手卖单被“放出笼子”，重新具备交易资格。
+撮合成交：被释放的卖单（9.70 元）直接砸向当前的买一（9.80 元）。根据“价格优先”与连续竞价规则，这笔订单会立即以 9.80 元 的被动方价格成交 50 手。
+                        """
     def insertOrder(self, order:ob_order, outOfCage=False):
         '''
         订单入列，更新对应的价格档位数据
@@ -1073,10 +1117,11 @@ class AXOB():
                 else:
                     # 出笼子了
                     # 如果委托价格比 基准价格低(废话), 并且, (目前笼子外还没有委托 或者 当前委托价格 大于 笼子外的最低价格)
-                    # 就是价格 小于 ask_cage_ref_px 但是 大于 卖方笼子的外的最高价格, 那就更新卖方笼子外的最高价格 
+                    # 就是价格 小于 ask_cage_ref_px(基准) 但是 大于 卖方笼子的外的最高价格, 那就更新卖方笼子外的最高价格 
 
+                    # 卖的, 基准价一般跟随 买方变动的, 现在的情况就是 卖方出现了一个更低的价格, 但是这个价格比买一高(必然), 小于基准价, 但是大于笼子外的最高的价格, 说明这个订单更接近卖一价格
 
-                    # self.DBG('Ask order out of cage.')
+                    self.DBG('Ask order out of cage.')
 
                     if order.price<self.ask_cage_ref_px and\
                         (self.ask_cage_lower_ex_max_level_qty==0 or order.price>self.ask_cage_lower_ex_max_level_price): #卖方笼子之下出现更高价
@@ -1738,7 +1783,7 @@ class AXOB():
         snap.AskWeightPx = self._clipInt32(snap.AskWeightPx) #当委托价无上限时，加权价格可能超出32位整数，也没有什么意义了，直接钳位到最大
 
 
-    # 每次处理 on_msg之前 就调用这个, 更新
+    # 每次处理 on_msg之前 就调用这个, 更新, 格式化时间
     def _useTimestamp(self, TransactTime):
         if self.SecurityIDSource == SecurityIDSource_SZSE:
             # TransactTime 20220426092044460  -- > 9204446
