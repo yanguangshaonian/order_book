@@ -1587,7 +1587,10 @@ self.ask_cage_ref_px = 9.80
                             self.ask_cage_ref_px = self.LastPx # 一旦lastPx被更新，总会到这里，而此后就不会再用PreClosePx了
                     self.DBG(f'Ask cage ref px={self.ask_cage_ref_px}')
                     
+                    # 当前的市场交易阶段，是否处于上午的连续竞价（AMTrading，9:30-11:30）或下午的连续竞价（PMTrading，13:00-14:57）
+                    # 否则如果在集合竞价期间（或者停牌、中午休市），直接走 else 分支，把标志位设为 False，禁止触发笼子扫描
                     if self.TradingPhaseMarket==axsbe_base.TPM.AMTrading or self.TradingPhaseMarket==axsbe_base.TPM.PMTrading:
+                        # 必须是创业板
                         self.ask_waiting_for_cage = True if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM else False
                     else:
                         self.ask_waiting_for_cage = False
