@@ -1201,9 +1201,35 @@ self.ask_cage_ref_px = 9.80
                 self.LowPx = exec.LastPx
 
         #有可能市价单剩余部分进队列，后续成交是由价格笼子外的订单造成的
+        """
+在深交所的L2逐笔数据中，当投资者提交一笔市价单时，交易所会先推送一条逐笔委托。
+但市价单本身是没有具体价格的（或者价格字段为无效值），它的真实成交价和成交量完全取决于当时的对手盘。
+因此，我们的还原模型在收到市价单时，不能立刻将它插入订单簿，
+而是必须把它“缓存（hold）”起来（即 self.holding_nb = 1 且 self.holding_order.type==TYPE.MARKET），
+等待紧随其后的逐笔成交消息来推导它的实际成交情况
+
+为什么会出现不匹配的成交？（主要发生在创业板价格笼子）
+正常情况下，市价单的委托记录后面，会紧跟属于它的成交记录或撤单记录。如果突然插进来一笔毫无关联的成交，这就意味着交易所对该市价单的撮合处理已经结束了。
+
+为什么直接出现了成交而没有先出现委托: 有可能市价单剩余部分进队列，后续成交是由价格笼子外的订单造成的
+部分成交与价格笼子：一个市价单（例如“本方最优价格申报”）可能先吃掉了对手盘的一部分量，但随后剩余的量触及了创业板的**“有效竞价范围（价格笼子）”**限制。
+转为限价单排队：受限于价格笼子，市价单的剩余部分无法继续吃单，也不会被撤销，而是会以笼子边界的价格转为限价单，挂在订单簿中。
+触发其他撮合：此时，订单簿的最优价可能发生了变化，导致原本被挡在价格笼子外面（处于隐藏状态）的订单，现在进入了笼子内并满足了撮合条件，从而产生了新的、与刚那个市价单无关的成交。
+
+这行代码在做校验：如果是市价单 
+当前到达的逐笔成交消息（exec），其买方订单号（BidApplSeqNum）和卖方订单号（OfferApplSeqNum），是否包含了我们正在缓存的那个市价单
+    如果都不等于，说明这笔最新成交与我们一直“苦苦等待”的市价单毫无关系
+    主板通常不会出现这种微观行为 留下日志
+    将这个市价单的剩余未成交部分，正式插入到当前的限价订单簿中（self.insertOrder(self.holding_order)），清空缓存标志（self.holding_nb = 0），然后继续处理这笔新的成交
+然后判断 holding_nb 是否不为0, 如果走入到了上面的两个if分支, 这里必然是0, 
+如果 holding_nb 不为0, 说明当前这笔成交是紧跟在我们缓存的市价单后面发生的, 那么就按照正常的成交处理逻辑来处理这个成交, 包括更新订单簿、更新价格笼子状态、生成快照等
+
+这段代码是量化模型在处理深交所高频数据时，为了应对“市价单遇到价格笼子导致撮合中断并转存订单簿”这一复杂微观场景而设计的强健性逻辑
+        """
         if self.holding_nb and self.holding_order.type==TYPE.MARKET:
             if self.holding_order.applSeqNum!=exec.BidApplSeqNum and self.holding_order.applSeqNum!=exec.OfferApplSeqNum:
-                self.WARN('MARKET order followed by unmatch exec, take as traded over!')
+                # self.WARN('MARKET order followed by unmatch exec, take as traded over!')
+                self.WARN('市价单随后执行不匹配操作，按交易完成情况执行!')
                 assert self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM, f'{self.SecurityID:06d} not CYB'
                 self.insertOrder(self.holding_order)
                 self.holding_nb = 0
@@ -1212,57 +1238,94 @@ self.ask_cage_ref_px = 9.80
                 self.genSnap()   #先出一个snap，时戳用市价单的
                 self._useTimestamp(exec.TransactTime)
                 
-
+        """
+主动委托到达 -> 缓存等待 -> 连续N笔成交到达 -> 撮合完毕 -> 剩余量挂单/撤单 -> 最终状态
+当一笔“吃单（Taker）”委托（市价单，或价格能立刻成交的限价单）到达时，模型将其缓存（holding_order），
+紧接着跟来了属于它的逐笔成交消息，模型据此实时更新订单簿
+        """
         if self.holding_nb!=0:
             # 紧跟缓存单的成交
+
+            # 当前缓存的单子（主动单/Taker）到底是买方还是卖方？如果成交记录里买方的序号（BidApplSeqNum）等于我们缓存单的序号，说明我们缓存的是个买单
             level_side = SIDE.ASK if exec.BidApplSeqNum==self.holding_order.applSeqNum else SIDE.BID #level_side:缓存单的对手盘
             self.DBG(f'level_side={level_side}')
             assert self.holding_order.qty>=exec.LastQty, f"{self.SecurityID:06d} holding order Qty unmatch"
             if self.holding_order.qty==exec.LastQty:
-                self.holding_nb = 0
+                self.holding_nb = 0  # 恰好全部成交，清空缓存
             else:
-                self.holding_order.qty -= exec.LastQty
+                self.holding_order.qty -= exec.LastQty  # 部分成交，主动单还有剩余
 
+                # 市价单在刚到达交易所时是没有明确价格的。在A股，市价单如果未能一次性全部成交而需要转为限价单排队
+                # 这里实时扣减缓存单的剩余数量。如果发现它是市价单，就赶紧把刚发生的真实成交价（LastPx）赋给它，并标记 traded = True，为它可能的后续“转挂单”做准备
                 if self.holding_order.type==TYPE.MARKET:   #修改市价单的价格
                     self.holding_order.price = exec.LastPx
                     self.holding_order.traded = True
 
+            # 主动单的数量扣减了，现在必须去订单簿的对手盘（被动排队的限价单）里，把对应的数量也扣掉。
             if level_side==SIDE.ASK:
                 self.tradeLimit(SIDE.ASK, exec.LastQty, exec.OfferApplSeqNum)
             else:
                 self.tradeLimit(SIDE.BID, exec.LastQty, exec.BidApplSeqNum)
 
+
             if self.holding_nb!=0 and self.holding_order.type==TYPE.LIMIT:  #检查限价单是否还有对手价
+                # 一旦无法继续撮合，这个主动单的生命周期就从 Taker 转为了 Maker。它必须被正式插入到订单簿中进行排队
                 if (self.holding_order.side==SIDE.BID and (self.holding_order.price<self.ask_min_level_price or self.ask_min_level_qty==0)) or \
                    (self.holding_order.side==SIDE.ASK and (self.holding_order.price>self.bid_max_level_price or self.bid_max_level_qty==0)):
                    # 对手盘已空，缓存单入列
                     self.insertOrder(self.holding_order)
                     self.holding_nb = 0
 
+            # 如果是创业板, 刚刚发生了一笔成交或者撤单，导致买一/卖一/最新成交价可能发生了改变，这意味着笼子的基准价变了！
             if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM:
                 self.enterCage()
 
             if self.holding_nb==0:
                 self.genSnap()   #缓存单成交完
+        
+
+        # 在正常逻辑下，如果没有刚下的市价单或能立刻成交的限价单，就不应该凭空出现一笔成交。但在这里，成交却实实在在地发生了。
+        # 说明这是个加个笼子放开的 幽灵成交, 它的背后可能是一个市价单，之前一直在等待成交消息来确认它的存在。现在这个成交消息来了，说明那个隐藏的订单已经被撮合了。
+        # 这两个 flag（bid_waiting_for_cage 或 ask_waiting_for_cage）在此前被置为 True 时，就说明模型预测到了**“有隐藏订单刚刚进入了价格笼子，并且它的价格足以和对面的最优价发生交叉（撮合）”**
+        # 既然这笔成交是由于“暗单入笼”引发的，我们只需要根据交易所推过来的成交细节（exec.LastQty），从本地订单簿的买卖双方精准扣减掉对应的流动性即可
         elif self.bid_waiting_for_cage or self.ask_waiting_for_cage:
             self.DBG("Order entered cage & exec.")
             self.tradeLimit(SIDE.ASK, exec.LastQty, exec.OfferApplSeqNum)
             self.tradeLimit(SIDE.BID, exec.LastQty, exec.BidApplSeqNum)
+
+            # 由于成交可能会吃掉对手盘的一个价位, 会改变笼子基准价格, 现在再次进行笼子判断
             if self.market_subtype==MARKET_SUBTYPE.SZSE_STK_GEM:
                 self.enterCage()
             self.genSnap()   #出一个snap
         else:
+            # 当前模型既没有缓存主动订单（holding_nb == 0），也没有预测到暗单入笼（waiting_for_cage == False），但却实实在在地收到了一笔来自交易所的成交数据
+            # 这在连续竞价的完美状态下是不应该发生的, 这是为了 处理深交所极端的“底层数据乱序”现象
+            # 具体案例：本来应该是“卖一被撤销 -> 导致价格笼子位移 -> 买单进入笼子 -> 触发卖二成交”。但交易所推送的顺序却是：“先推了卖二的成交，再推了卖一的撤单”。
+            #面对这种“意料之外”的成交，即使摸不着头脑，模型也绝不能崩溃。后续的逻辑会强制把这笔成交应用到订单簿上，以保证盘口流动性在后续事件到达后能达到最终一致性（Eventual Consistency）。
+
             assert self.holding_nb==0, f'{self.SecurityID:06d} unexpected exec while holding_nb!=0'
             #20221010 300654  碰到深交所订单乱序：先发送2档以上的逐笔成交，再发送1档的撤单（卖方1档撤单导致买方订单进入价格笼子，吃掉卖方2档及以上）；目前直接应用成交可以正常继续重建:
-            if not ((exec.TransactTime%SZSE_TICK_CUT==92500000)or(exec.TransactTime%SZSE_TICK_CUT==150000000) if self.SecurityIDSource==SecurityIDSource_SZSE else (exec.TransactTime==9250000)or(exec.TransactTime==15000000)) and\
-               self.TradingPhaseMarket!=axsbe_base.TPM.VolatilityBreaking:
+
+            # 在集合竞价期间（如 9:15-9:25），所有的委托只是在排队积累，并不撮合。当时间严格到达 9:25:00 时，交易所主机瞬间进行集中撮合，
+            # 并开始像泄洪一样连续推送成百上千条 逐笔成交）
+            # 因为这些成交不是由“刚刚到达的某笔单子”触发的，自然也没有 holding_order。所以代码判断：如果时间戳刚好是 09:25:00、15:00:00，或者是处于“波动性中断（临时停牌后的集合竞价）”，那么这些成交是完全合法的，不予报警。
+            # 如果不在这些时间点，说明可能是真的出现了严重的数据乱序，抛出 WARN 警
+            if not ((exec.TransactTime%SZSE_TICK_CUT==92500000)or(exec.TransactTime%SZSE_TICK_CUT==150000000) if self.SecurityIDSource==SecurityIDSource_SZSE else (exec.TransactTime==9250000)or(exec.TransactTime==15000000)) and self.TradingPhaseMarket!=axsbe_base.TPM.VolatilityBreaking:
                 self.WARN(f'unexpected exec @{exec.TransactTime}!')
 
+            # 无论这笔成交是由于集合竞价产生的，还是因为交易所乱序推送产生的，只要成交发生了，买卖双方的单子就是确确实实被消耗了。
+            # 因此，无条件进入内部的价格档位树（Level Tree）中扣减掉对应的 LastQty
             self.tradeLimit(SIDE.ASK, exec.LastQty, exec.OfferApplSeqNum)
             self.tradeLimit(SIDE.BID, exec.LastQty, exec.BidApplSeqNum)
 
+            # 在集合竞价积累期间，买一价通常是大于卖一价的，这种状态在金融微观结构学中称为订单簿交叉
+            # 随着 9:25 集合竞价撮合的批量成交消息不断涌入，模型不断执行 tradeLimit 扣减双方流动性
+            # 一旦判断出买方最优价已经小于卖方最优价（ask_min_level_price > bid_max_level_price），或者某一方的单子被打空了，
+            # 这标志着订单簿解交叉（Uncrossed）完成，集合竞价积压的所有成交已经全部推送完毕！
             if self.ask_min_level_qty==0 or self.bid_max_level_qty==0 or self.ask_min_level_price>self.bid_max_level_price:
                 self.DBG('openCall/closeCall trade over')
+
+                # 如果是临停（波动性中断）恢复，则将交易阶段切回正常的连续竞价阶段
                 if self.TradingPhaseMarket==axsbe_base.TPM.VolatilityBreaking:
                     self.TradingPhaseMarket = exec.TradingPhaseMarket
                 self.genSnap()   #集合竞价所有成交完成
@@ -1273,7 +1336,7 @@ self.ask_cage_ref_px = 9.80
         # 这个函数是一个死循环（While True），因为买方订单进入笼子会改变买一价，从而改变卖方的基准价，可能诱发卖方订单进入笼子，卖方变化又反过来影响买方，形成连锁反应
         # 任何可能导致“基准价”（Reference Price）发生变化的事件，都必须触发
         # 卖方笼子基准价 约等于 买一价 (Bid 1), 买方笼子基准价 约等于 卖一价 (Ask 1)
-        # 基准价获取顺序为：对手方一档 -> 本方一档 -> 最近成交价.
+        # 基准价获取顺序为：对手方一档 -> 本方一档 -> 最近成交价 -> 前收盘价.
 
         # 进笼推演 -> 发现成交可能 -> 立即暂停 -> 等实锤（逐笔成交）
         # 一旦有新订单进入笼子, 那就触发连锁反应, 直到找到第一个能够立即成交的单子,然后退出循环等待交易所来驱动下一步的动作
@@ -1440,19 +1503,35 @@ self.ask_cage_ref_px = 9.80
     def levelDequeue(self, side, price, qty, applSeqNum):
         '''买/卖方价格档出列（撤单或成交时）'''
         if side == SIDE.BID:
+            # 这是维护订单簿状态的最基础操作。无论是被人吃单了，还是挂单人主动撤单了，这个价格档位的排队量都切实减少了
+            # 对应订单数量和缓存订单数量减去
             self.bid_level_tree[price].qty -= qty
             self._export_level_access(f'LEVEL_ACCESS BID locate {price} //levelDequeue')
             # self.bid_level_tree[price].ts.remove(applSeqNum)
             if price==self.bid_max_level_price:
                 self.bid_max_level_qty -= qty
 
+            # A 股的快照切片（3秒一次）里包含一个字段叫 BidWeightPx（买方委托数量加权平均价）。模型必须实时维护所有可见订单的 Size（总数量）和 Value（总金额）来计算这个值
+            # bid_cage_upper_ex_min_level_price 指的是：在买方，因为出价太高（超过基准价102%）而被关在笼子外面（隐藏）的订单中，价格最低的那一档。
+            # 条件 A self.bid_cage_upper_ex_min_level_qty==0 目前笼子外面根本没有任何隐藏的暗单
+            # 条件 B (price < ..._price)：当前发生撤单或成交的订单价格，低于笼子外面的最低价。换句话说，这个价格属于“笼子内部”的合法价格
+            # 只要满足其一，说明当前变动的这笔单子，是一笔实实在在挂在盘口上大家都看得到的“明单”
             if self.bid_cage_upper_ex_min_level_qty==0 or price<self.bid_cage_upper_ex_min_level_price:
                 self.BidWeightSize -= qty
                 self.BidWeightValue -= price * qty
+
+            # 判断是否 找到新的“笼外最低价”来接班
+            # 这笔单子不是明单（被第一个 if 拦下来了）。
+            # 条件 A (qty 非 0)：笼子外面确实有隐藏单。
+            # 条件 B (price == ..._price)：当前发生变动的这笔订单，恰好就等于我们记录的“笼外最低价”。
+            # 因为它是一个“暗单”，所以不需要去扣减前面的 BidWeightSize 等加权统计
+            # 但是，既然撤单或成交恰好发生在这个“边界价位”上，我们就必须把边界的存量（bid_cage_upper_ex_min_level_qty）给扣掉
             elif self.bid_cage_upper_ex_min_level_qty and price==self.bid_cage_upper_ex_min_level_price:
                 self.bid_cage_upper_ex_min_level_qty -= qty
                 if self.bid_cage_upper_ex_min_level_qty==0: #买方价格笼子外最低价被cancel/trade光
-                    # locate next high bid level
+                    # 如果把这个边界价位的单子全撤光了，意味着这个“守门员”没了，模型必须立刻启动一个循环，向更高的价格去扫描，寻找下一个离笼子最近的暗单，重新确立 bid_cage_upper_ex_min_level_price。
+                    # 只有这样，当笼子上限由于基准价变动而上移时，模型才能准确知道接下来该把哪一档暗单“释放”进盘口。
+                    # 从小到大遍历买方价格树
                     self._export_level_access(f'LEVEL_ACCESS BID locate_higher {self.bid_cage_upper_ex_min_level_price} //levelDequeue:find next level out of cage')
                     for p, l in sorted(self.bid_level_tree.items(),key=lambda x:x[0], reverse=False):    #从小到大遍历，TODO:可以先判断是否存在
                         if p>self.bid_cage_upper_ex_min_level_price:
@@ -1460,28 +1539,51 @@ self.ask_cage_ref_px = 9.80
                             self.bid_cage_upper_ex_min_level_qty = l.qty
                             self.DBG(f'Refresh bid_cage_upper_ex_min_level_price={self.bid_cage_upper_ex_min_level_price} by canceled/traded all')
                             break
-
+            
+            # 继续判断 当前成交的量是否被吃完
+            #     如果只是减少，档位依然存在，不需要调整整体结构。
+            #     一旦归零，意味着这个价格防线被彻底撕破，后续必须将这个节点从二叉树/哈希表中剔除
+            # 在连续竞价或集合竞价中，无论是对手盘凶猛的“吃单（Taker）”，还是本方资金的主动撤单，
+            # 一旦把当前“买一（最优买价）”档位上的最后一点流动性消耗殆尽，这个价格档位就不复存在了。
+            # 此时，订单簿必须立刻完成**“买二上位，成为新买一”**的交接工作
             if self.bid_level_tree[price].qty==0:
+                # 判断是不是买1被吃光了，如果是，寻找买2上位
                 if price==self.bid_max_level_price:  #买方最高价被cancel/trade光
                     self.bid_max_level_qty = 0
                     # locate next lower bid level
+                    # 从大到小, 寻找第一个严格小于旧买一价（p < self.bid_max_level_price）的价格档位，让它接班成为新的买一价
                     self._export_level_access(f'LEVEL_ACCESS BID locate_lower {self.bid_max_level_price} //levelDequeue:find next side level')
                     for p, l in sorted(self.bid_level_tree.items(),key=lambda x:x[0], reverse=True):    #从大到小遍历
                         if p<self.bid_max_level_price:
                             self.bid_max_level_price = p
                             self.bid_max_level_qty = l.qty
                             break
-
-                    # 修改卖方价格笼子参考价
+                    
+                    # 既然买方最高价（买一）发生了变化，或者买盘直接被抽干了，那么以“买一”作为基准价的“卖方价格笼子”就必须立刻跟着重新计算！
+                    # 前面代码已经找出了新的买方最高价。如果买方盘口还有单子（qty != 0），那么卖方（Ask）价格笼子的新基准价，理所当然就是这个新的“买一价”
                     if self.bid_max_level_qty!=0:                       # 买方还有下一档
                         self.ask_cage_ref_px = self.bid_max_level_price
                     else:
-                        self._export_level_access(f'LEVEL_ACCESS ASK locate {price} //levelDequeue:update oppo ref px')
+                        # 如果买方盘口被彻底打空了（bid_max_level_qty == 0），没有对手方最优价了怎么办？进入 else 分支进行层层兜底降级：
+                        # 本方最优价 -> 最新成交价
+                        # 买方没有下一档
+
+                        # 这行判断的 代码的核心作用是：在极其混乱的盘口交叉（Crossed Book）或撮合瞬间，防止读取到“过期的（Stale）”卖一价缓存，从而进行精准的状态抢救。
+                        # 调用 levelDequeue 不仅是因为“撤单”，还可能是因为**“成交（Trade）”**。
+                        #     假设发生了一笔成交，成交价正是这个 price。
+                        #     既然能成交，说明在这一瞬间，买方和卖方在 price 这个价位上都有单子。
+                        #     现在我们正在处理这笔成交对**买方（BID）**的扣减。买方的单子比较小，被彻底吃光了（bid_level_tree[price].qty == 0）。
+                        #     但是，卖方（ASK）在 price 这个价位上的单子可能比较大，还没有被吃完！
+                        #     如果卖方在 price 这个价位上还有剩余的单子，那么毫无疑问，这个 price 就是当前全场最低的卖出价，也就是真正的、最新的“卖一价”！
+                        #         状态不同步的真空期：在模型处理一笔成交时，它是依次调用 tradeLimit 扣减买方和卖方的。如果在处理买方归零的这一瞬间，
+                        #         卖方的数据缓存（如 ask_min_level_price）还没来得及在内存中完成最终的刷新和对齐，直接读取它，拿到的就是一个**“脏数据（Dirty Data）”**。
+                        #     如果 price 也不在卖方树里（说明卖方在这一档也被吃光了，或者这根本就是一笔撤单而非成交），代码才会走到下一个 elif
                         if price in self.ask_level_tree:             # 卖方本价位有量(此时ask_min_level_price可能是旧的)
                             self.ask_cage_ref_px = price                    #TODO: 卖方hold?
                         elif self.ask_min_level_qty!=0:
-                            self.ask_cage_ref_px = self.ask_min_level_price
+                            self.ask_cage_ref_px = self.ask_min_level_price   # 卖一价格
                         else:
+                            # 最新价
                             self.ask_cage_ref_px = self.LastPx # 一旦lastPx被更新，总会到这里，而此后就不会再用PreClosePx了
                     self.DBG(f'Ask cage ref px={self.ask_cage_ref_px}')
                     
